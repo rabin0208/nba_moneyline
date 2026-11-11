@@ -14,7 +14,7 @@ from nba_moneyline.features import (
     snapshot_features,
     updated_ratings,
 )
-from nba_moneyline.player_box import PlayerLine, box_score, player_lines_from_summary
+from nba_moneyline.player_box import box_score, player_lines_from_summary
 from nba_moneyline.schema import Game
 
 
@@ -53,9 +53,9 @@ def _game(
 
 class FeatureTests(unittest.TestCase):
     def test_column_contract(self) -> None:
-        self.assertEqual(len(FEATURE_COLUMNS), 23)
-        self.assertIn("home_rotation_delta", FEATURE_COLUMNS)
-        self.assertIn("away_rotation_delta", FEATURE_COLUMNS)
+        self.assertEqual(len(FEATURE_COLUMNS), 21)
+        self.assertNotIn("home_rotation_delta", FEATURE_COLUMNS)
+        self.assertNotIn("away_rotation_delta", FEATURE_COLUMNS)
         self.assertNotIn("home_prior_games", FEATURE_COLUMNS)
         self.assertNotIn("away_prior_games", FEATURE_COLUMNS)
         self.assertNotIn("home_points_diff_per_game", FEATURE_COLUMNS)
@@ -237,48 +237,6 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(lines[0].player_id, "2")
         self.assertEqual(lines[0].team, "BOS")
         self.assertAlmostEqual(lines[0].minutes, 30)
-
-    def test_rotation_delta_is_zero_when_the_mix_does_not_change(self) -> None:
-        star = PlayerLine("star", "BOS", 30, 30)
-        bench = PlayerLine("bench", "BOS", 18, 0)
-        away = [PlayerLine("away", "NY", 36, 10)]
-        games = [_game(0, "BOS", "NY"), _game(2, "BOS", "NY")]
-        lines = {games[0].game_id: [star, bench, *away]}
-        frame = build_feature_frame(games, lines, prior_minutes=0)
-        second = frame.iloc[1]
-        self.assertAlmostEqual(second["home_rotation_delta"], 0.0)
-        self.assertAlmostEqual(second["away_rotation_delta"], 0.0)
-
-    def test_rotation_delta_falls_when_the_productive_player_sat_last_game(self) -> None:
-        star = PlayerLine("star", "BOS", 30, 30)
-        bench = PlayerLine("bench", "BOS", 18, 0)
-        sat = PlayerLine("bench", "BOS", 36, 0)
-        away = [PlayerLine("away", "NY", 36, 10)]
-        games = [_game(0, "BOS", "NY"), _game(2, "BOS", "NY"), _game(4, "BOS", "NY")]
-        lines = {
-            games[0].game_id: [star, bench, *away],
-            games[1].game_id: [sat, *away],
-        }
-        frame = build_feature_frame(games, lines, prior_minutes=0)
-        self.assertAlmostEqual(frame.iloc[1]["home_rotation_delta"], 0.0)
-        self.assertLess(frame.iloc[2]["home_rotation_delta"], 0.0)
-        self.assertAlmostEqual(frame.iloc[0]["home_rotation_delta"], 0.0)
-
-    def test_same_day_rotation_is_invisible(self) -> None:
-        star = PlayerLine("star", "BOS", 30, 30)
-        bench = PlayerLine("bench", "BOS", 18, 0)
-        first = _game(0, "BOS", "NY")
-        earlier_same_day = _game(2, "LAL", "BOS")
-        later_same_day = _game(2, "BOS", "NY")
-        lines = {
-            first.game_id: [star, bench, PlayerLine("ny", "NY", 30, 0)],
-            earlier_same_day.game_id: [PlayerLine("bench", "BOS", 36, 0), PlayerLine("lal", "LAL", 30, 0)],
-        }
-        frame = build_feature_frame([first, earlier_same_day, later_same_day], lines, prior_minutes=0)
-        bos_away = frame.loc[frame["game_id"] == earlier_same_day.game_id].iloc[0]
-        bos_home = frame.loc[frame["game_id"] == later_same_day.game_id].iloc[0]
-        self.assertAlmostEqual(bos_away["away_rotation_delta"], 0.0)
-        self.assertAlmostEqual(bos_home["home_rotation_delta"], 0.0)
 
     def test_first_games_are_ineligible(self) -> None:
         games = [_game(index * 2, "BOS", "NYK") for index in range(4)]

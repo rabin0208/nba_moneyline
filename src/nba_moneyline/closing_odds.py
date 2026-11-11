@@ -6,16 +6,19 @@ import json
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
 
-from nba_moneyline.market import parse_american_odds
+from nba_moneyline.market import is_valid_american_odds, parse_american_odds
 from nba_moneyline.train import FEATURES_CSV
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SUMMARY_DIR = PROJECT_ROOT / "data" / "raw" / "espn_summary"
+CORE_ODDS_DIR = PROJECT_ROOT / "data" / "raw" / "espn_core_odds"
 CLOSING_ODDS_CSV = PROJECT_ROOT / "data" / "closing_odds.csv"
+HISTORICAL_SEASON_STARTS = tuple(range(2017, 2025))
 PAUSE_SECONDS = 0.05
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -133,6 +136,127 @@ def closing_line_from_summary(payload: dict) -> dict[str, object] | None:
     line["home_open"] = _recorded_price(moneyline.get("home"), "open")
     line["away_open"] = _recorded_price(moneyline.get("away"), "open")
     return line
+
+
+def core_odds_url(event_id: str) -> str:
+    return (
+        "https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba/"
+        f"events/{event_id}/competitions/{event_id}/odds?limit=50"
+    )
+
+
+def _book_rank(name: str) -> int | None:
+    """Lower is better. Live prices are ignored. DraftKings, then consensus, then ESPN BET."""
+
+    folded = name.casefold()
+    if "live" in folded:
+        return None
+    compact = folded.replace(" ", "")
+    if "draftkings" in compact:
+        return 0
+    if folded == "consensus":
+        return 1
+    if compact == "espnbet":
+        return 2
+    if compact == "caesarssportsbook":
+        return 3
+    return None
+
+
+def close_from_core_odds(payload: dict) -> dict[str, object] | None:
+    """Pick one pregame moneyline from an ESPN core odds list."""
+
+    best: dict[str, object] | None = None
+    best_rank = 99
+    for item in payload.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str((item.get("provider") or {}).get("name") or "")
+        rank = _book_rank(name)
+        if rank is None or rank >= best_rank:
+            continue
+        home = (item.get("homeTeamOdds") or {}).get("moneyLine")
+        away = (item.get("awayTeamOdds") or {}).get("moneyLine")
+        if not is_valid_american_odds(home) or not is_valid_american_odds(away):
+            continue
+        best_rank = rank
+        best = {
+            "home_odds": float(home),
+            "away_odds": float(away),
+            "provider": name,
+            "spread": str(item.get("details") or ""),
+            "home_open": None,
+            "away_open": None,
+        }
+    return best
+
+
+def _load_core_odds(event_id: str) -> dict:
+    path = CORE_ODDS_DIR / f"{event_id}.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    CORE_ODDS_DIR.mkdir(parents=True, exist_ok=True)
+    body = _fetch(core_odds_url(event_id))
+    json.loads(body)
+    path.write_text(body, encoding="utf-8")
+    return json.loads(body)
+
+
+def download_historical_closes(
+    season_starts: tuple[int, ...] = HISTORICAL_SEASON_STARTS,
+    pause_seconds: float = PAUSE_SECONDS,
+) -> pd.DataFrame:
+    """Closing moneylines for seasons the game summary does not carry.
+
+    DraftKings when that book is posted, otherwise the ESPN consensus, otherwise ESPN BET,
+    otherwise Caesars.
+    """
+
+    features = pd.read_csv(FEATURES_CSV)
+    season = features.loc[
+        features["season_start"].isin(season_starts) & (features["eligible"] == 1),
+        ["game_id", "season_start"],
+    ]
+    if season.empty:
+        raise RuntimeError(f"No eligible games for seasons {season_starts}")
+    def one(game: object) -> tuple[bool, dict[str, object] | None]:
+        event_id = str(game.game_id).removeprefix("espn_")
+        cached = (CORE_ODDS_DIR / f"{event_id}.json").exists()
+        payload = _load_core_odds(event_id)
+        if not cached and pause_seconds:
+            time.sleep(pause_seconds)
+        parsed = close_from_core_odds(payload)
+        if parsed is None:
+            return cached, None
+        return cached, {"game_id": game.game_id, "season_start": int(game.season_start), **parsed}
+
+    rows: list[dict[str, object]] = []
+    downloaded = 0
+    games = list(season.itertuples(index=False))
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = [pool.submit(one, game) for game in games]
+        for index, future in enumerate(as_completed(futures), start=1):
+            cached, row = future.result()
+            downloaded += int(not cached)
+            if row is not None:
+                rows.append(row)
+            if index % 200 == 0 or index == len(games):
+                print(
+                    f"historical closes {index}/{len(games)}  lines={len(rows)}  downloaded={downloaded}",
+                    flush=True,
+                )
+    frame = pd.DataFrame(rows)
+    if CLOSING_ODDS_CSV.exists():
+        existing = pd.read_csv(CLOSING_ODDS_CSV)
+        existing = existing.loc[~existing["season_start"].isin(season_starts)]
+        merged = pd.concat([existing, frame], ignore_index=True)
+    else:
+        merged = frame
+    merged = merged.drop_duplicates(subset=["game_id"], keep="first")
+    CLOSING_ODDS_CSV.parent.mkdir(parents=True, exist_ok=True)
+    merged.to_csv(CLOSING_ODDS_CSV, index=False)
+    print(f"wrote {len(merged)} closing lines to {CLOSING_ODDS_CSV}", flush=True)
+    return merged
 
 
 def download_closing_odds(season_start: int, pause_seconds: float = PAUSE_SECONDS) -> pd.DataFrame:

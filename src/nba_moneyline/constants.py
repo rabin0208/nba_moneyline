@@ -24,8 +24,6 @@ FEATURE_COLUMNS = (
     "away_shot_quality_share",
     "home_back_to_back",
     "away_back_to_back",
-    "home_rotation_delta",
-    "away_rotation_delta",
 )
 
 # ESPN scoreboard abbreviations.

@@ -1,4 +1,4 @@
-"""Daily slate and holdout profit, laid out like the baseball moneyline app."""
+"""Daily slate and season results, laid out like the hockey moneyline app."""
 
 from __future__ import annotations
 
@@ -22,11 +22,15 @@ from nba_moneyline.market import (  # noqa: E402
     cap_slate_stakes,
     format_american_odds,
     pick_bets,
-    prepare_profit_bets,
     recommended_bankroll_frac,
 )
 from nba_moneyline.closing_odds import CLOSING_ODDS_CSV  # noqa: E402
-from nba_moneyline.profits import available_seasons, load_model_games, season_label  # noqa: E402
+from nba_moneyline.profits import (  # noqa: E402
+    attach_pick_prices,
+    load_model_games,
+    same_ticket_roi,
+    season_result_table,
+)
 from nba_moneyline.train import FEATURES_CSV  # noqa: E402
 from nba_moneyline.slate import score_slate  # noqa: E402
 
@@ -105,13 +109,6 @@ def cached_slate(iso_date: str) -> pd.DataFrame:
     return score_slate(date.fromisoformat(iso_date))
 
 
-def dollar_delta(units: float, unit_dollars: float) -> str:
-    amount = units * unit_dollars
-    if amount < 0:
-        return f"-${abs(amount):,.0f}"
-    return f"+${amount:,.0f}"
-
-
 def dollars(amount: float) -> str:
     if amount < 0:
         return f"-${abs(amount):,.0f}"
@@ -128,79 +125,6 @@ def moneyline(value: object) -> str:
     if value is None or pd.isna(value):
         return "—"
     return format_american_odds(float(value))
-
-
-def monthly_table(bets: pd.DataFrame) -> pd.DataFrame:
-    columns = [
-        "Month",
-        "Bets",
-        "Wins",
-        "Hit rate",
-        "Flat profit (u)",
-        "Flat ROI",
-        "Kelly profit (u)",
-        "Kelly ROI",
-    ]
-    if bets.empty:
-        return pd.DataFrame(columns=columns)
-    work = bets.copy()
-    work["month"] = pd.to_datetime(work["game_date"]).dt.to_period("M")
-    monthly = (
-        work.groupby("month", as_index=False)
-        .agg(
-            Bets=("bet_profit", "count"),
-            Wins=("bet_won", "sum"),
-            flat_profit=("bet_profit", "sum"),
-            kelly_wagered=("kelly_stake_u", "sum"),
-            kelly_profit=("kelly_profit_u", "sum"),
-        )
-        .sort_values("month")
-    )
-    monthly["Wins"] = monthly["Wins"].astype(int)
-    monthly["Hit rate"] = monthly["Wins"] / monthly["Bets"]
-    monthly["Flat ROI"] = monthly["flat_profit"] / monthly["Bets"]
-    monthly["Kelly ROI"] = monthly["kelly_profit"] / monthly["kelly_wagered"].where(
-        monthly["kelly_wagered"] > 0
-    )
-    monthly["Month"] = monthly["month"].astype(str)
-    monthly["Flat profit (u)"] = monthly["flat_profit"]
-    monthly["Kelly profit (u)"] = monthly["kelly_profit"]
-    return monthly[columns]
-
-
-def cumulative_frame(bets: pd.DataFrame) -> pd.DataFrame:
-    work = bets.copy()
-    work["Flat profit"] = work["bet_profit"].cumsum()
-    work["Kelly-weighted profit"] = work["kelly_profit_u"].cumsum()
-    return work.melt(
-        id_vars=["game_date"],
-        value_vars=["Flat profit", "Kelly-weighted profit"],
-        var_name="Strategy",
-        value_name="Profit (u)",
-    )
-
-
-def bet_table(bets: pd.DataFrame, unit_dollars: float) -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "Date": bets["game_date"],
-            "Matchup": bets["away_team"] + " @ " + bets["home_team"],
-            "Bet": bets.apply(
-                lambda row: (
-                    f"{row['home_team'] if row['bet_side'] == 'home' else row['away_team']} "
-                    f"{format_american_odds(row['bet_odds'])}"
-                ),
-                axis=1,
-            ),
-            "Edge": bets["bet_edge"].map(lambda edge: f"{edge:+.1%}"),
-            "Result": bets["bet_won"].map(lambda won: "Win" if won else "Loss"),
-            "Score": bets["away_score"].astype(int).astype(str) + "-" + bets["home_score"].astype(int).astype(str),
-            "Profit (u)": bets["bet_profit"].map(lambda profit: f"{profit:+.2f}"),
-            "Profit ($)": (bets["bet_profit"] * unit_dollars).map(
-                lambda amount: f"-${abs(amount):,.0f}" if amount < 0 else f"+${amount:,.0f}"
-            ),
-        }
-    )
 
 
 def attach_stakes(games: pd.DataFrame) -> pd.DataFrame:
@@ -390,154 +314,118 @@ def render_daily_slate(
 
 
 def render_profit_tab() -> None:
+    st.subheader("Results")
+    edge_percent = st.slider(
+        "Minimum edge",
+        min_value=0,
+        max_value=20,
+        value=0,
+        step=1,
+        format="%d%%",
+        key="results_edge_percent",
+        help="0% bets every predicted winner that has a moneyline. A higher value keeps only picks that beat the line by at least that much.",
+    )
+    market = st.radio(
+        "Edge vs",
+        options=["Closing", "Opening (DraftKings)"],
+        horizontal=True,
+        help=(
+            "Closing is the pregame moneyline: DraftKings when that book is posted, "
+            "the ESPN consensus for 2017–18 and 2018–19, Caesars where that consensus is missing, "
+            "and ESPN BET for 2024–25. "
+            "Opening is the DraftKings open from 2025–26 on, and the bet pays at that price."
+        ),
+    )
+    side_label = st.radio(
+        "Side",
+        options=["All", "Favorites", "Underdogs"],
+        horizontal=True,
+        key="results_side",
+        help="Keeps the predicted winner only when that side is the favorite or the underdog at the selected line. A favorite has the higher vig-free price.",
+    )
+    threshold = edge_percent / 100.0
+    use_open = market.startswith("Opening")
+    line = "opening" if use_open else "closing"
+    side = {"All": "all", "Favorites": "favorite", "Underdogs": "underdog"}[side_label]
+    side_clause = "" if side == "all" else f" The bet is kept only when that pick is the {side_label[:-1].lower()} at the {line} line."
+    st.caption(
+        "The model is the logistic regression trained on 2017–18 through 2024–25, so those rows are in-sample. "
+        "2025–26 is the holdout. "
+        "Accuracy uses every game with a closing line. "
+        f"ROI is a $1 bet on the predicted winner when its edge over the vig-free {line} line "
+        f"is at least {edge_percent}%. Payout uses the {line} moneyline for that side. "
+        "Opening prices are DraftKings and start in 2025–26."
+        f"{side_clause}"
+    )
     try:
         games = cached_games(FEATURES_CSV.stat().st_mtime, CLOSING_ODDS_CSV.stat().st_mtime)
     except Exception as exc:
         st.error(str(exc))
         return
-    seasons = available_seasons(games)
-    default_index = len(seasons) - 1
-    controls = st.columns([1, 1, 1, 2])
-    with controls[0]:
-        season_start = st.selectbox(
-            "Season",
-            options=seasons,
-            index=default_index,
-            format_func=season_label,
+    priced = attach_pick_prices(games)
+    ticket = same_ticket_roi(priced, threshold, side)
+    if ticket is not None:
+        count, close_roi, opening_roi = ticket
+        ticket_side = "" if side == "all" else f" {side}"
+        st.caption(
+            f"Same closing{ticket_side} bets that also have an opening price: "
+            f"closing ROI {close_roi:+.1%}, opening price {opening_roi:+.1%} "
+            f"({count} bets)."
         )
-    with controls[1]:
-        price = st.segmented_control(
-            "Line",
-            options=["Open", "Close"],
-            default="Open",
-            required=True,
-            key="profit_line",
-        )
-    with controls[2]:
-        unit_dollars = st.number_input("Unit size ($)", min_value=1, value=100, step=25)
-    with controls[3]:
-        edge_percent = st.slider(
-            "Minimum edge",
-            min_value=0,
-            max_value=20,
-            value=5,
-            step=1,
-            format="%d%%",
-            key="profit_edge",
-            help="Model probability minus the vig-free price of the selected line.",
-        )
-    season_games = games.loc[games["season_start"] == season_start].copy()
-    use_open = price != "Close"
-    if use_open:
-        season_games = season_games.dropna(subset=["home_open", "away_open"]).copy()
-        season_games["home_odds"] = season_games["home_open"]
-        season_games["away_odds"] = season_games["away_open"]
-    line_name = "open" if use_open else "close"
-    bets = prepare_profit_bets(season_games, edge_percent / 100.0)
-    provider = season_games["provider"].dropna().mode()
-    provider_name = str(provider.iloc[0]) if not provider.empty else "DraftKings"
-    st.caption(
-        f"{season_label(season_start)} · {len(season_games):,} games with a {provider_name} {line_name}. "
-        "Edge and profit both use that price. Flat stakes are 1 unit. "
-        "Kelly stakes are rescaled so the average stake is also 1 unit."
+    table = season_result_table(priced, threshold, "open" if use_open else "close", side)
+    display = table.copy()
+    display["accuracy"] = display["accuracy"].map(lambda value: f"{value:.1%}")
+    display["hit_rate"] = display["hit_rate"].map(lambda value: "—" if pd.isna(value) else f"{value:.1%}")
+    display["profit"] = display["profit"].map(lambda value: "—" if pd.isna(value) else f"{value:+.1f}")
+    display["roi"] = display["roi"].map(lambda value: "—" if pd.isna(value) else f"{value:+.1%}")
+    display = display.rename(
+        columns={
+            "season": "Season",
+            "games": "Games",
+            "accuracy": "Accuracy",
+            "bets": "Bets",
+            "hit_rate": "Bet hit rate",
+            "profit": "Profit ($1)",
+            "roi": "ROI",
+        }
     )
+    st.dataframe(display, width="stretch", hide_index=True)
 
-    kpis = st.columns(4)
-    if bets.empty:
-        kpis[0].metric("Bets", 0)
-        kpis[1].metric("Hit rate", "—")
-        kpis[2].metric("Flat profit", "—")
-        kpis[3].metric("Kelly profit", "—")
-        st.info(f"No bets clear a {edge_percent}% edge in {season_label(season_start)}.")
+    chart_data = table.iloc[:-1].dropna(subset=["roi"])
+    if chart_data.empty:
+        st.info(f"No bets clear a {edge_percent}% edge.")
         return
-
-    flat_profit = float(bets["bet_profit"].sum())
-    kelly_profit = float(bets["kelly_profit_u"].sum())
-    hit_rate = float(bets["bet_won"].mean())
-    flat_roi = flat_profit / len(bets)
-    kelly_roi = kelly_profit / float(bets["kelly_stake_u"].sum())
-    kpis[0].metric("Bets", len(bets))
-    kpis[1].metric("Hit rate", f"{hit_rate:.1%}")
-    kpis[2].metric("Flat profit", f"{flat_profit:+.1f} u", delta=dollar_delta(flat_profit, float(unit_dollars)))
-    kpis[3].metric(
-        "Kelly profit",
-        f"{kelly_profit:+.1f} u",
-        delta=f"{kelly_roi - flat_roi:+.1%} vs flat",
-    )
-    if kelly_roi < flat_roi - 0.005:
-        st.warning(
-            "Kelly-weighted ROI is lower: the biggest edges lost more than the smaller ones. "
-            "That is overconfidence. The close was the sharper number."
-        )
-    elif kelly_roi > flat_roi + 0.005:
-        st.info(
-            "Kelly lost less than flat staking on this sample, and both are still down. "
-            "Sizing did not turn the prices into an edge."
-        )
-    st.caption(
-        f"Flat ROI {flat_roi:+.1%} on {len(bets)} units. "
-        f"Kelly ROI {kelly_roi:+.1%} on the same total amount."
-    )
-
-    curve = cumulative_frame(bets)
     chart = (
-        alt.Chart(curve)
-        .mark_line()
-        .encode(
-            x=alt.X("game_date:T", title="Date"),
-            y=alt.Y("Profit (u):Q", title="Cumulative profit (units)"),
-            color=alt.Color(
-                "Strategy:N",
-                scale=alt.Scale(
-                    domain=["Flat profit", "Kelly-weighted profit"],
-                    range=["#f58426", "#7dce6a"],
-                ),
-            ),
-            tooltip=["game_date:T", "Strategy:N", alt.Tooltip("Profit (u):Q", format="+.2f")],
-        )
-        .properties(height=320)
-    )
-    st.altair_chart(chart, width="stretch")
-
-    monthly = monthly_table(bets)
-    show = monthly.copy()
-    show["Hit rate"] = show["Hit rate"].map(lambda value: f"{value:.1%}")
-    show["Flat profit (u)"] = show["Flat profit (u)"].map(lambda value: f"{value:+.2f}")
-    show["Flat ROI"] = show["Flat ROI"].map(lambda value: f"{value:+.1%}")
-    show["Kelly profit (u)"] = show["Kelly profit (u)"].map(lambda value: f"{value:+.2f}")
-    show["Kelly ROI"] = show["Kelly ROI"].map(lambda value: "—" if pd.isna(value) else f"{value:+.1%}")
-    st.dataframe(show, width="stretch", hide_index=True)
-
-    bars = monthly.melt(
-        id_vars=["Month", "Bets"],
-        value_vars=["Flat ROI", "Kelly ROI"],
-        var_name="Strategy",
-        value_name="ROI",
-    ).dropna()
-    bar_chart = (
-        alt.Chart(bars)
+        alt.Chart(chart_data)
         .mark_bar()
         .encode(
-            x=alt.X("Month:N", sort=list(monthly["Month"]), title="Month"),
-            xOffset="Strategy:N",
-            y=alt.Y("ROI:Q", title="ROI", axis=alt.Axis(format=".0%")),
-            color=alt.Color(
-                "Strategy:N",
-                scale=alt.Scale(domain=["Flat ROI", "Kelly ROI"], range=["#f58426", "#7dce6a"]),
-            ),
-            tooltip=["Month:N", "Strategy:N", alt.Tooltip("ROI:Q", format="+.1%"), "Bets:Q"],
+            x=alt.X("season:N", title="Season", sort=list(chart_data["season"])),
+            y=alt.Y("roi:Q", title="ROI", axis=alt.Axis(format=".0%")),
+            tooltip=[
+                alt.Tooltip("season:N", title="Season"),
+                alt.Tooltip("bets:Q", title="Bets"),
+                alt.Tooltip("roi:Q", title="ROI", format=".1%"),
+                alt.Tooltip("profit:Q", title="Profit", format="+.1f"),
+            ],
+            color=alt.value("#f58426"),
         )
-        .properties(height=280)
+        .properties(
+            height=280,
+            title=(
+                f"{market} ROI by season at {edge_percent}% minimum edge"
+                if side == "all"
+                else f"{market} {side_label.lower()} ROI by season at {edge_percent}% minimum edge"
+            ),
+        )
     )
-    st.altair_chart(bar_chart, width="stretch")
-    st.dataframe(bet_table(bets, float(unit_dollars)), width="stretch", hide_index=True)
+    st.altair_chart(chart, width="stretch")
 
 
 st.markdown(
     """
     <section class="nba-hero">
       <h1>NBA Moneyline</h1>
-      <p>Win probabilities compared with the DraftKings line. Profit settles each season against that book’s close.</p>
+      <p>Win probabilities compared with the DraftKings line. Results are a $1 bet on the side the model picks.</p>
     </section>
     """,
     unsafe_allow_html=True,
@@ -596,7 +484,7 @@ with st.sidebar:
         "DraftKings moneyline. Margin is model probability minus the vig-free price."
     )
 
-slate_tab, profit_tab = st.tabs(["Daily slate", "Profit"])
+slate_tab, profit_tab = st.tabs(["Daily slate", "Results"])
 
 with slate_tab:
     render_daily_slate(

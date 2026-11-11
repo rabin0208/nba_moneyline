@@ -27,6 +27,20 @@ METRICS_PATH = PROJECT_ROOT / "results" / "tables" / "holdout_metrics.csv"
 COEF_PATH = PROJECT_ROOT / "results" / "tables" / "coefficients.csv"
 
 
+def load_model_bundle() -> dict:
+    """Load the saved pipeline.
+
+    scikit-learn 1.8 dropped ``LogisticRegression.multi_class``. A model saved
+    with that version has no such attribute, and 1.7 still reads it on predict.
+    """
+
+    bundle = joblib.load(MODEL_PATH)
+    logistic = bundle["pipeline"].named_steps["logistic"]
+    if not hasattr(logistic, "multi_class"):
+        logistic.multi_class = "auto"
+    return bundle
+
+
 def make_pipeline() -> Pipeline:
     return Pipeline(
         [

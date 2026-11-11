@@ -34,7 +34,7 @@ The training home-win rate is the comparison baseline. It is a constant probabil
 
 ## Features
 
-23 columns.
+21 columns.
 
 ### Decayed win rate
 
@@ -104,22 +104,6 @@ This is the stand-in for the NHL model's expected-goal share: shot quality, not 
 
 Games in the prior 7 days were part of the NHL schedule pair and were removed here. Most NBA weeks are three games, so that count barely moves.
 
-### Rotation
-
-`home_rotation_delta`, `away_rotation_delta`.
-
-How different last game's players were from the players who have been playing for that team this season. The level of the team is subtracted out, so a good team that is whole scores 0. The first game of a season is 0, because there is no season mix yet. A game with no cached box score does not move the rotation.
-
-Each player who played has a box score:
-
-```text
-box = PTS + REB + AST + STL + BLK - TO - missed FG - missed FT
-```
-
-His rate is that box per minute, shrunk toward the team's own per-minute average with 400 minutes of prior weight. Last game's strength weights those rates by the minutes in that game. The usual strength weights them by minutes played for this team this season. The column is last game's strength minus the usual strength.
-
-This uses the previous game's rotation, not the injury report. A player who sits tonight still counts until he has missed a game.
-
 ## Considered and left out
 
 - A separate column for each of the last 10 game results. The NHL test of that shape was worse on every validation fold. The last 3 home or road games are one mean per team, not three columns.
@@ -130,3 +114,4 @@ This uses the previous game's rotation, not the injury report. A player who sits
 - Injuries, starting lineups, in-game win probability, and play-by-play. The public injury feed is the current list, not the list from that morning.
 - Moneylines, spreads, and totals.
 - Continuous rest days. The back-to-back flag is the schedule effect that is large enough to keep.
+- Last game's rotation versus the season's usual mix. It describes who played last night, not who is out tonight, and it did not improve the holdout.

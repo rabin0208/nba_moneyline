@@ -19,11 +19,9 @@ from nba_moneyline.constants import (
     FEATURE_COLUMNS,
     MIN_PRIOR_GAMES,
     RECENT_WINDOW,
-    ROTATION_PRIOR_MINUTES,
     VENUE_RECENT_WINDOW,
     WIN_RATE_HALF_LIFE_GAMES,
 )
-from nba_moneyline.player_box import PlayerLine, RotationBook
 from nba_moneyline.schema import Game
 
 
@@ -175,7 +173,7 @@ def _apply_game(state: TeamState, game: Game, *, is_home: bool) -> None:
     state.last_game_season = game.season_start
 
 
-def _row(game: Game, states: dict[str, TeamState], rotations: RotationBook) -> dict[str, object]:
+def _row(game: Game, states: dict[str, TeamState]) -> dict[str, object]:
     home = _side_features(states[game.home_team], game.game_date, game.season_start, True)
     away = _side_features(states[game.away_team], game.game_date, game.season_start, False)
     home_share = home["shot_quality_share"]
@@ -217,8 +215,6 @@ def _row(game: Game, states: dict[str, TeamState], rotations: RotationBook) -> d
         "away_shot_quality_share": away_share,
         "home_back_to_back": home["back_to_back"],
         "away_back_to_back": away["back_to_back"],
-        "home_rotation_delta": rotations.delta(game.home_team, game.season_start),
-        "away_rotation_delta": rotations.delta(game.away_team, game.season_start),
     }
     return values
 
@@ -233,15 +229,9 @@ def _update(game: Game, states: dict[str, TeamState]) -> None:
     states[game.away_team].elo = new_away
 
 
-def _walk(
-    games: list[Game],
-    player_lines: dict[str, list[PlayerLine]] | None = None,
-    prior_minutes: float = ROTATION_PRIOR_MINUTES,
-) -> tuple[list[dict[str, object]], dict[str, TeamState], RotationBook]:
+def _walk(games: list[Game]) -> tuple[list[dict[str, object]], dict[str, TeamState]]:
     ordered = sorted(games, key=lambda game: (game.game_date, game.game_id))
-    lines = player_lines or {}
     states: dict[str, TeamState] = defaultdict(TeamState)
-    rotations = RotationBook(prior_minutes=prior_minutes)
     rows: list[dict[str, object]] = []
     index = 0
     while index < len(ordered):
@@ -251,14 +241,11 @@ def _walk(
             end += 1
         day_games = ordered[index:end]
         for game in day_games:
-            rows.append(_row(game, states, rotations))
+            rows.append(_row(game, states))
         for game in day_games:
             _update(game, states)
-            game_lines = lines.get(game.game_id, [])
-            rotations.apply(game.home_team, game.season_start, game_lines)
-            rotations.apply(game.away_team, game.season_start, game_lines)
         index = end
-    return rows, states, rotations
+    return rows, states
 
 
 def _as_feature_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
@@ -271,25 +258,16 @@ def _as_feature_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
     return frame
 
 
-def build_feature_frame(
-    games: list[Game],
-    player_lines: dict[str, list[PlayerLine]] | None = None,
-    prior_minutes: float = ROTATION_PRIOR_MINUTES,
-) -> pd.DataFrame:
+def build_feature_frame(games: list[Game]) -> pd.DataFrame:
     """Return one row per game, including ineligible rows."""
 
-    rows, _states, _rotations = _walk(games, player_lines, prior_minutes)
+    rows, _states = _walk(games)
     return _as_feature_frame(rows)
 
 
-def snapshot_features(
-    history: list[Game],
-    slate: list[Game],
-    player_lines: dict[str, list[PlayerLine]] | None = None,
-    prior_minutes: float = ROTATION_PRIOR_MINUTES,
-) -> pd.DataFrame:
-    """Features for slate games. Slate scores and slate box scores are not applied."""
+def snapshot_features(history: list[Game], slate: list[Game]) -> pd.DataFrame:
+    """Features for slate games. Slate scores are not applied."""
 
-    _rows, states, rotations = _walk(history, player_lines, prior_minutes)
+    _rows, states = _walk(history)
     ordered = sorted(slate, key=lambda game: (game.game_date, game.game_id))
-    return _as_feature_frame([_row(game, states, rotations) for game in ordered])
+    return _as_feature_frame([_row(game, states) for game in ordered])

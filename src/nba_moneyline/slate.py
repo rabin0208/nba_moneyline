@@ -6,16 +6,14 @@ import json
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-import joblib
 import pandas as pd
 
 from nba_moneyline.acquire import cache_path, ensure_scoreboards, games_from_scoreboard, read_games
 from nba_moneyline.closing_odds import cached_summary_line, line_from_quote
 from nba_moneyline.constants import FEATURE_COLUMNS, TEAMS
 from nba_moneyline.features import snapshot_features
-from nba_moneyline.player_box import load_player_lines
 from nba_moneyline.schema import Game
-from nba_moneyline.train import MODEL_PATH
+from nba_moneyline.train import MODEL_PATH, load_model_bundle
 
 TEAM_SET = set(TEAMS)
 
@@ -180,12 +178,12 @@ def score_slate(target: date, *, today: date | None = None) -> pd.DataFrame:
             game.provider = str(line.get("provider") or game.provider)
             game.spread = str(line.get("spread") or game.spread)
 
-    features = snapshot_features(history, [_placeholder(game) for game in selected], load_player_lines())
+    features = snapshot_features(history, [_placeholder(game) for game in selected])
     if features.empty:
         return features
     if not MODEL_PATH.is_file():
         raise FileNotFoundError(f"Missing {MODEL_PATH}. Fit the model first.")
-    bundle = joblib.load(MODEL_PATH)
+    bundle = load_model_bundle()
     pipeline = bundle["pipeline"]
     columns = list(bundle.get("feature_columns") or FEATURE_COLUMNS)
     features = features.copy()
