@@ -25,6 +25,7 @@ from nba_moneyline.market import (  # noqa: E402
     recommended_bankroll_frac,
 )
 from nba_moneyline.closing_odds import CLOSING_ODDS_CSV  # noqa: E402
+from nba_moneyline.opening_odds import AN_CLOSING_ODDS_CSV, OPENING_ODDS_CSV  # noqa: E402
 from nba_moneyline.profits import (  # noqa: E402
     attach_pick_prices,
     load_model_games,
@@ -100,7 +101,9 @@ st.markdown(
 
 
 @st.cache_data(show_spinner=False)
-def cached_games(features_mtime: float, odds_mtime: float) -> pd.DataFrame:
+def cached_games(
+    features_mtime: float, odds_mtime: float, opening_mtime: float, closing_mtime: float
+) -> pd.DataFrame:
     return load_model_games()
 
 
@@ -327,13 +330,13 @@ def render_profit_tab() -> None:
     )
     market = st.radio(
         "Edge vs",
-        options=["Closing", "Opening (DraftKings)"],
+        options=["Closing (Action Network)", "Opening (Action Network)"],
         horizontal=True,
         help=(
-            "Closing is the pregame moneyline: DraftKings when that book is posted, "
-            "the ESPN consensus for 2017–18 and 2018–19, Caesars where that consensus is missing, "
-            "and ESPN BET for 2024–25. "
-            "Opening is the DraftKings open from 2025–26 on, and the bet pays at that price."
+            "Closing is the Action Network consensus (book 15), the same book the hockey model uses. "
+            "It is the pregame price and starts in 2023–24. "
+            "Opening is the Action Network Open line (book 30). "
+            "It starts in 2024–25, and the bet pays at that price."
         ),
     )
     side_label = st.radio(
@@ -354,11 +357,19 @@ def render_profit_tab() -> None:
         "Accuracy uses every game with a closing line. "
         f"ROI is a $1 bet on the predicted winner when its edge over the vig-free {line} line "
         f"is at least {edge_percent}%. Payout uses the {line} moneyline for that side. "
-        "Opening prices are DraftKings and start in 2025–26."
+        "Closing prices are the Action Network consensus and start in 2023–24. "
+        "Opening prices are the Action Network Open line and start in 2024–25."
         f"{side_clause}"
     )
     try:
-        games = cached_games(FEATURES_CSV.stat().st_mtime, CLOSING_ODDS_CSV.stat().st_mtime)
+        opening_mtime = OPENING_ODDS_CSV.stat().st_mtime if OPENING_ODDS_CSV.is_file() else 0.0
+        closing_mtime = AN_CLOSING_ODDS_CSV.stat().st_mtime if AN_CLOSING_ODDS_CSV.is_file() else 0.0
+        games = cached_games(
+            FEATURES_CSV.stat().st_mtime,
+            CLOSING_ODDS_CSV.stat().st_mtime,
+            opening_mtime,
+            closing_mtime,
+        )
     except Exception as exc:
         st.error(str(exc))
         return

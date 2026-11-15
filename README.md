@@ -19,9 +19,10 @@ PYTHONPATH=src python -m nba_moneyline player-boxes
 PYTHONPATH=src python -m nba_moneyline features
 PYTHONPATH=src python -m nba_moneyline train
 PYTHONPATH=src python -m nba_moneyline closing-odds --season 2025
+PYTHONPATH=src python -m nba_moneyline opening-odds
 ```
 
-`closing-odds` stores DraftKings closes for eligible games in that season (`2025` is the 2025–26 holdout, `2026` is the current season).
+`closing-odds` stores the Action Network consensus close (book 15, the same book as the hockey model) from 2023–24 on. `opening-odds` stores the Action Network Open line (book 30) from 2024–25 on. The daily slate still uses the current DraftKings price.
 
 ## App
 

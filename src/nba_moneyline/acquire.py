@@ -22,6 +22,7 @@ from nba_moneyline.schema import Game
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RAW_DIR = PROJECT_ROOT / "data" / "raw" / "espn"
+SUMMARY_DIR = PROJECT_ROOT / "data" / "raw" / "espn_summary"
 GAMES_CSV = PROJECT_ROOT / "data" / "games.csv"
 SKIPPED_CSV = PROJECT_ROOT / "data" / "skipped_games.csv"
 
@@ -107,6 +108,38 @@ def _stat(competitor: dict, name: str) -> int:
     raise KeyError(name)
 
 
+def _optional_stat(competitor: dict, name: str) -> int | None:
+    try:
+        return _stat(competitor, name)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def turnovers_from_summary(payload: dict) -> tuple[int | None, int | None]:
+    """Home and away turnover totals from an ESPN game summary."""
+
+    found: dict[str, int] = {}
+    for team_block in (payload.get("boxscore") or {}).get("teams") or []:
+        side = team_block.get("homeAway")
+        if side not in {"home", "away"}:
+            continue
+        for stat in team_block.get("statistics") or []:
+            if stat.get("name") != "turnovers":
+                continue
+            try:
+                found[side] = int(float(stat.get("displayValue")))
+            except (TypeError, ValueError):
+                continue
+    return found.get("home"), found.get("away")
+
+
+def _summary_turnovers(event_id: str) -> tuple[int | None, int | None]:
+    path = SUMMARY_DIR / f"{event_id}.json"
+    if not path.is_file():
+        return None, None
+    return turnovers_from_summary(json.loads(path.read_text(encoding="utf-8")))
+
+
 def games_from_scoreboard(payload: dict, slate_date: date) -> tuple[list[Game], list[dict[str, str]]]:
     games: list[Game] = []
     skipped: list[dict[str, str]] = []
@@ -146,6 +179,7 @@ def games_from_scoreboard(payload: dict, slate_date: date) -> tuple[list[Game], 
                 }
             except KeyError:
                 shooting = {}
+            home_turnovers, away_turnovers = _summary_turnovers(event_id)
             record = Game(
                 game_id=f"espn_{event_id}",
                 game_date=slate_date,
@@ -154,6 +188,12 @@ def games_from_scoreboard(payload: dict, slate_date: date) -> tuple[list[Game], 
                 away_team=away_team,
                 home_score=home_score,
                 away_score=away_score,
+                home_fg3a=_optional_stat(home, "threePointFieldGoalsAttempted"),
+                away_fg3a=_optional_stat(away, "threePointFieldGoalsAttempted"),
+                home_rebounds=_optional_stat(home, "rebounds"),
+                away_rebounds=_optional_stat(away, "rebounds"),
+                home_turnovers=home_turnovers,
+                away_turnovers=away_turnovers,
                 **shooting,
             )
         except (KeyError, TypeError, ValueError) as error:
@@ -202,6 +242,12 @@ def write_games() -> list[Game]:
                 "away_fg": game.away_fg,
                 "away_fga": game.away_fga,
                 "away_fg3": game.away_fg3,
+                "home_fg3a": game.home_fg3a,
+                "away_fg3a": game.away_fg3a,
+                "home_rebounds": game.home_rebounds,
+                "away_rebounds": game.away_rebounds,
+                "home_turnovers": game.home_turnovers,
+                "away_turnovers": game.away_turnovers,
                 "home_win": game.home_win,
             }
             for game in games
@@ -238,6 +284,12 @@ def read_games() -> list[Game]:
                 away_fg=_optional_int(row.away_fg),
                 away_fga=_optional_int(row.away_fga),
                 away_fg3=_optional_int(row.away_fg3),
+                home_fg3a=_optional_int(getattr(row, "home_fg3a", None)),
+                away_fg3a=_optional_int(getattr(row, "away_fg3a", None)),
+                home_rebounds=_optional_int(getattr(row, "home_rebounds", None)),
+                away_rebounds=_optional_int(getattr(row, "away_rebounds", None)),
+                home_turnovers=_optional_int(getattr(row, "home_turnovers", None)),
+                away_turnovers=_optional_int(getattr(row, "away_turnovers", None)),
             )
         )
     return games

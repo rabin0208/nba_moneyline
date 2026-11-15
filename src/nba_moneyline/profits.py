@@ -10,6 +10,12 @@ import pandas as pd
 from nba_moneyline.closing_odds import CLOSING_ODDS_CSV
 from nba_moneyline.constants import FEATURE_COLUMNS
 from nba_moneyline.market import american_to_implied_prob, flat_bet_profit, is_valid_american_odds, remove_vig
+from nba_moneyline.opening_odds import (
+    AN_CLOSING_ODDS_CSV,
+    OPENING_ODDS_CSV,
+    overlay_closes,
+    overlay_opens,
+)
 from nba_moneyline.train import FEATURES_CSV, MODEL_PATH, load_model_bundle
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -22,20 +28,27 @@ def season_label(season_start: int) -> str:
 def load_model_games() -> pd.DataFrame:
     if not MODEL_PATH.is_file():
         raise FileNotFoundError(f"Missing {MODEL_PATH}. Fit the model first.")
-    if not CLOSING_ODDS_CSV.is_file():
-        raise FileNotFoundError(
-            f"Missing {CLOSING_ODDS_CSV}. Run: python -m nba_moneyline closing-odds --season 2025"
-        )
     bundle = load_model_bundle()
     pipeline = bundle["pipeline"]
     columns = list(bundle.get("feature_columns") or FEATURE_COLUMNS)
     features = pd.read_csv(FEATURES_CSV)
     eligible = features.loc[features["eligible"] == 1].copy()
     eligible["p_home_win"] = pipeline.predict_proba(eligible[columns])[:, 1]
-    odds = pd.read_csv(CLOSING_ODDS_CSV)
-    merged = eligible.merge(odds, on=["game_id", "season_start"], how="inner")
-    if merged.empty:
-        raise RuntimeError("No games matched a closing moneyline.")
+    if AN_CLOSING_ODDS_CSV.is_file():
+        merged = overlay_closes(eligible, pd.read_csv(AN_CLOSING_ODDS_CSV))
+        if merged.empty:
+            raise RuntimeError("No games matched an Action Network consensus close.")
+    else:
+        if not CLOSING_ODDS_CSV.is_file():
+            raise FileNotFoundError(
+                f"Missing {CLOSING_ODDS_CSV}. Run: python -m nba_moneyline closing-odds"
+            )
+        odds = pd.read_csv(CLOSING_ODDS_CSV)
+        merged = eligible.merge(odds, on=["game_id", "season_start"], how="inner")
+        if merged.empty:
+            raise RuntimeError("No games matched a closing moneyline.")
+    if OPENING_ODDS_CSV.is_file():
+        merged = overlay_opens(merged, pd.read_csv(OPENING_ODDS_CSV))
     return merged.sort_values(["game_date", "game_id"]).reset_index(drop=True)
 
 

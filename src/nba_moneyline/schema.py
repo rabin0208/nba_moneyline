@@ -21,6 +21,12 @@ class Game:
     away_fg: int | None = None
     away_fga: int | None = None
     away_fg3: int | None = None
+    home_fg3a: int | None = None
+    away_fg3a: int | None = None
+    home_rebounds: int | None = None
+    away_rebounds: int | None = None
+    home_turnovers: int | None = None
+    away_turnovers: int | None = None
 
     @property
     def has_shooting(self) -> bool:
