@@ -364,9 +364,10 @@ def render_profit_tab() -> None:
     try:
         opening_mtime = OPENING_ODDS_CSV.stat().st_mtime if OPENING_ODDS_CSV.is_file() else 0.0
         closing_mtime = AN_CLOSING_ODDS_CSV.stat().st_mtime if AN_CLOSING_ODDS_CSV.is_file() else 0.0
+        espn_mtime = CLOSING_ODDS_CSV.stat().st_mtime if CLOSING_ODDS_CSV.is_file() else 0.0
         games = cached_games(
             FEATURES_CSV.stat().st_mtime,
-            CLOSING_ODDS_CSV.stat().st_mtime,
+            espn_mtime,
             opening_mtime,
             closing_mtime,
         )
