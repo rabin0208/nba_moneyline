@@ -4,4 +4,11 @@ __pycache__/
 .DS_Store
 data/raw/
 data/*.csv
-results/
+!data/games.csv
+!data/features.csv
+!data/an_closing_odds.csv
+!data/opening_odds.csv
+results/*
+!results/models/
+results/models/*
+!results/models/logistic_regression.joblib

@@ -115,8 +115,8 @@ def _optional_stat(competitor: dict, name: str) -> int | None:
         return None
 
 
-def turnovers_from_summary(payload: dict) -> tuple[int | None, int | None]:
-    """Home and away turnover totals from an ESPN game summary."""
+def team_stat_from_summary(payload: dict, name: str) -> tuple[int | None, int | None]:
+    """Home and away values for one team box-score stat."""
 
     found: dict[str, int] = {}
     for team_block in (payload.get("boxscore") or {}).get("teams") or []:
@@ -124,7 +124,7 @@ def turnovers_from_summary(payload: dict) -> tuple[int | None, int | None]:
         if side not in {"home", "away"}:
             continue
         for stat in team_block.get("statistics") or []:
-            if stat.get("name") != "turnovers":
+            if stat.get("name") != name:
                 continue
             try:
                 found[side] = int(float(stat.get("displayValue")))
@@ -133,11 +133,18 @@ def turnovers_from_summary(payload: dict) -> tuple[int | None, int | None]:
     return found.get("home"), found.get("away")
 
 
-def _summary_turnovers(event_id: str) -> tuple[int | None, int | None]:
+def turnovers_from_summary(payload: dict) -> tuple[int | None, int | None]:
+    """Home and away turnover totals from an ESPN game summary."""
+
+    return team_stat_from_summary(payload, "turnovers")
+
+
+def _summary_box(event_id: str) -> tuple[tuple[int | None, int | None], tuple[int | None, int | None]]:
     path = SUMMARY_DIR / f"{event_id}.json"
     if not path.is_file():
-        return None, None
-    return turnovers_from_summary(json.loads(path.read_text(encoding="utf-8")))
+        return (None, None), (None, None)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return turnovers_from_summary(payload), team_stat_from_summary(payload, "offensiveRebounds")
 
 
 def games_from_scoreboard(payload: dict, slate_date: date) -> tuple[list[Game], list[dict[str, str]]]:
@@ -179,7 +186,7 @@ def games_from_scoreboard(payload: dict, slate_date: date) -> tuple[list[Game], 
                 }
             except KeyError:
                 shooting = {}
-            home_turnovers, away_turnovers = _summary_turnovers(event_id)
+            (home_turnovers, away_turnovers), (home_orb, away_orb) = _summary_box(event_id)
             record = Game(
                 game_id=f"espn_{event_id}",
                 game_date=slate_date,
@@ -192,6 +199,10 @@ def games_from_scoreboard(payload: dict, slate_date: date) -> tuple[list[Game], 
                 away_fg3a=_optional_stat(away, "threePointFieldGoalsAttempted"),
                 home_rebounds=_optional_stat(home, "rebounds"),
                 away_rebounds=_optional_stat(away, "rebounds"),
+                home_orb=home_orb,
+                away_orb=away_orb,
+                home_fta=_optional_stat(home, "freeThrowsAttempted"),
+                away_fta=_optional_stat(away, "freeThrowsAttempted"),
                 home_turnovers=home_turnovers,
                 away_turnovers=away_turnovers,
                 **shooting,
@@ -246,6 +257,10 @@ def write_games() -> list[Game]:
                 "away_fg3a": game.away_fg3a,
                 "home_rebounds": game.home_rebounds,
                 "away_rebounds": game.away_rebounds,
+                "home_orb": game.home_orb,
+                "away_orb": game.away_orb,
+                "home_fta": game.home_fta,
+                "away_fta": game.away_fta,
                 "home_turnovers": game.home_turnovers,
                 "away_turnovers": game.away_turnovers,
                 "home_win": game.home_win,
@@ -288,6 +303,10 @@ def read_games() -> list[Game]:
                 away_fg3a=_optional_int(getattr(row, "away_fg3a", None)),
                 home_rebounds=_optional_int(getattr(row, "home_rebounds", None)),
                 away_rebounds=_optional_int(getattr(row, "away_rebounds", None)),
+                home_orb=_optional_int(getattr(row, "home_orb", None)),
+                away_orb=_optional_int(getattr(row, "away_orb", None)),
+                home_fta=_optional_int(getattr(row, "home_fta", None)),
+                away_fta=_optional_int(getattr(row, "away_fta", None)),
                 home_turnovers=_optional_int(getattr(row, "home_turnovers", None)),
                 away_turnovers=_optional_int(getattr(row, "away_turnovers", None)),
             )

@@ -27,6 +27,12 @@ FEATURE_COLUMNS = (
     "away_season_win_rate",
     "home_recent_win_rate",
     "away_recent_win_rate",
+    "home_recent_result_residual",
+    "away_recent_result_residual",
+    "home_recent_offensive_rating",
+    "away_recent_offensive_rating",
+    "home_recent_defensive_rating",
+    "away_recent_defensive_rating",
     "home_elo_minus_away_elo",
     "home_shot_quality_share",
     "away_shot_quality_share",
@@ -76,8 +82,8 @@ TRAIN_SEASON_STARTS = tuple(range(2017, 2025))
 TEST_SEASON_START = 2025
 
 MIN_PRIOR_GAMES = 5
-# Current season plus the three before it. Matches the hockey prior window.
-PRIOR_SEASON_WINDOW = 4
+# Current season plus the two before it.
+PRIOR_SEASON_WINDOW = 3
 RECENT_FORM_WINDOW = 10
 
 ELO_INITIAL = 1500.0

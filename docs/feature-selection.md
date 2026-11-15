@@ -12,7 +12,7 @@ A row is one regular-season game. Preseason, play-in, and playoffs are not rows,
 
 The game date is the ESPN slate date, not the UTC tip time. Rows are ordered by that date, then game id. Every game on a date is scored before any result from that date updates team state. A feature may use only games with an earlier date.
 
-A row is eligible for fitting and evaluation when both teams have at least 5 completed regular-season games inside the four-season window before that date, and both shot-quality shares, field-goal percentages, three-point percentages, turnover rates, and rebound rates are finite. No feature is imputed. An empty win rate is 0.5. The first game of a season uses 0 games and 0.5 for the season win rate.
+A row is eligible for fitting and evaluation when both teams have at least 5 completed regular-season games inside the three-season window before that date, and both shot-quality shares, field-goal percentages, three-point percentages, turnover rates, rebound rates, and last-10 opponent-adjusted offensive and defensive ratings are finite. No feature is imputed. An empty win rate is 0.5. An empty Elo residual is 0. The first game of a season uses 0 games and 0.5 for the season win rate.
 
 ## Sample
 
@@ -34,9 +34,9 @@ The training home-win rate is the comparison baseline. It is a constant probabil
 
 ## Features
 
-31 columns. The first 23 match the hockey model except the four overtime and shootout features. Eight more are the team box-score rates below. The four-season window is the current season plus the three before it. Games already played this season count in both the window and the season columns.
+37 columns. The first 23 match the hockey model except the four overtime and shootout features. Eight more are the team box-score rates below, and six are the last-10 opponent-adjusted form. The three-season window is the current season plus the two before it. Games already played this season count in both the window and the season columns.
 
-### Last four seasons
+### Last three seasons
 
 Equal-weight counts inside the window. A season older than that is dropped, not decayed.
 
@@ -66,13 +66,24 @@ Reset when the season changes. October through June is one season, labeled by th
 
 ### Last 10 games
 
-`home_recent_win_rate`, `away_recent_win_rate`. Equal-weight mean of that team's last 10 games, home and road together. With fewer than 10, the mean uses the games played. With none, the value is 0.5.
+The window is the last 10 games, home and road together, and it can cross a season. With fewer than 10, the mean uses the games played. A game that is missing free-throw attempts, offensive rebounds, or turnovers, or whose opponent had no pregame rating, is left out of the rating means and does not pull in an older game.
+
+```text
+possessions = FGA − offensive rebounds + turnovers + 0.44 × free-throw attempts
+offensive rating = 100 × points scored / possessions
+defensive rating = 100 × points allowed / opponent possessions
+```
+
+- `home_recent_win_rate`, `away_recent_win_rate`. Equal-weight win rate. With no games, the value is 0.5.
+- `home_recent_result_residual`, `away_recent_result_residual`. For each game, the win minus that team's pregame Elo win probability, then the mean. A win over a weak opponent shrinks, and a win over a strong opponent stays large. With no games, the value is 0.
+- `home_recent_offensive_rating`, `away_recent_offensive_rating`. For each game, that game's offensive rating minus the opponent's pregame defensive rating, then the mean. The opponent rating is the three-season rating entering that game. Positive means the team scored more per 100 possessions than the opponent usually allows.
+- `home_recent_defensive_rating`, `away_recent_defensive_rating`. For each game, that game's defensive rating minus the opponent's pregame offensive rating, then the mean. A lower number is better.
 
 ### Elo
 
 `home_elo_minus_away_elo`.
 
-One difference. Ratings are rebuilt from games inside the same four-season window, and every team starts at 1500 for that replay. Scale 400. K is 20. The update uses the win and the loss only: no home-court bump, no margin of victory, and no smaller step for overtime. Ratings for a date are read before that date's games are applied.
+One difference. Ratings are rebuilt from games inside the same three-season window, and every team starts at 1500 for that replay. Scale 400. K is 20. The update uses the win and the loss only: no home-court bump, no margin of victory, and no smaller step for overtime. Ratings for a date are read before that date's games are applied.
 
 ### Fatigue
 
@@ -86,3 +97,5 @@ The previous game can fall in the prior season. There is no season reset.
 - Overtime and extra-time rate and win counts. Those four columns are the only hockey features left out.
 - A decayed win rate, goal differential, and a separate column for each of the last 10 results.
 - Moneylines, spreads, and totals.
+- A last-10 net rating. It equals the recent offensive adjustment minus the recent defensive adjustment.
+- A raw last-10 offensive or defensive rating. The last-10 ratings are the opponent-adjusted versions.
