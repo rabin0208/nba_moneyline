@@ -3,9 +3,12 @@
 History is every regular-season game with an earlier date. All games on a
 date are read before any of that date's results update team state.
 
-Counts, rates, points, shot quality, and Elo use the current season and the
-three seasons before it. The last-10 win rate, the current-season record, and
-fatigue follow the hockey model. Overtime and shootout features are omitted.
+Strength rates use the previous regular season and the current season shrunk
+toward it. Elo still replays the current season and the three before it.
+Scoring, turnovers, and rebounds are per possession. The last-10 window keeps
+the win rate, an Elo residual, and opponent-adjusted offensive and defensive
+ratings. Fatigue follows the hockey model. Overtime and shootout features are
+omitted.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from nba_moneyline.constants import (
     MIN_PRIOR_GAMES,
     PRIOR_SEASON_WINDOW,
     RECENT_FORM_WINDOW,
+    SHRINK_PSEUDO_GAMES,
 )
 from nba_moneyline.schema import Game
 
@@ -54,19 +58,33 @@ class SeasonBucket:
     home_wins: int = 0
     away_games: int = 0
     away_wins: int = 0
-    points_for: float = 0.0
-    points_against: float = 0.0
     fg_value_for: float = 0.0
     fga_for: float = 0.0
-    fg_value_against: float = 0.0
-    fga_against: float = 0.0
-    fg_made_for: float = 0.0
-    fg3_made_for: float = 0.0
-    fg3a_for: float = 0.0
+    rated_points_for: float = 0.0
+    rated_points_against: float = 0.0
+    poss_for: float = 0.0
+    poss_against: float = 0.0
+    turnover_numer: float = 0.0
+    turnover_denom: float = 0.0
     rebounds_for: float = 0.0
+    rebounds_against: float = 0.0
+    rated_games: int = 0
+    shooting_games: int = 0
     rebound_games: int = 0
-    turnovers_for: float = 0.0
-    turnover_games: int = 0
+
+
+@dataclass
+class LeagueSeason:
+    """Pooled results for one season. Used as the prior when a team has no season of its own."""
+
+    games: int = 0
+    home_wins: int = 0
+    points: float = 0.0
+    possessions: float = 0.0
+    fg_value: float = 0.0
+    fga: float = 0.0
+    turnover_numer: float = 0.0
+    turnover_denom: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,11 +95,19 @@ class EloEvent:
     home_won: bool
 
 
+@dataclass(frozen=True, slots=True)
+class RecentGame:
+    won: int
+    residual: float
+    offensive_adj: float | None
+    defensive_adj: float | None
+
+
 @dataclass
 class TeamState:
     season_buckets: dict[int, SeasonBucket] = field(default_factory=dict)
     game_dates: list[date] = field(default_factory=list)
-    recent_results: list[int] = field(default_factory=list)
+    recent_games: list[RecentGame] = field(default_factory=list)
 
 
 def _window_bucket(state: TeamState, season_start: int) -> SeasonBucket:
@@ -96,32 +122,36 @@ def _window_bucket(state: TeamState, season_start: int) -> SeasonBucket:
         total.home_wins += bucket.home_wins
         total.away_games += bucket.away_games
         total.away_wins += bucket.away_wins
-        total.points_for += bucket.points_for
-        total.points_against += bucket.points_against
         total.fg_value_for += bucket.fg_value_for
         total.fga_for += bucket.fga_for
-        total.fg_value_against += bucket.fg_value_against
-        total.fga_against += bucket.fga_against
-        total.fg_made_for += bucket.fg_made_for
-        total.fg3_made_for += bucket.fg3_made_for
-        total.fg3a_for += bucket.fg3a_for
+        total.rated_points_for += bucket.rated_points_for
+        total.rated_points_against += bucket.rated_points_against
+        total.poss_for += bucket.poss_for
+        total.poss_against += bucket.poss_against
+        total.turnover_numer += bucket.turnover_numer
+        total.turnover_denom += bucket.turnover_denom
         total.rebounds_for += bucket.rebounds_for
+        total.rebounds_against += bucket.rebounds_against
+        total.rated_games += bucket.rated_games
+        total.shooting_games += bucket.shooting_games
         total.rebound_games += bucket.rebound_games
-        total.turnovers_for += bucket.turnovers_for
-        total.turnover_games += bucket.turnover_games
     return total
 
 
-def _rate(wins: int, games: int) -> float:
-    if games == 0:
-        return 0.5
-    return wins / games
+# Free throws are worth about 0.44 of a possession in the standard estimate.
+FTA_POSSESSION_WEIGHT = 0.44
 
 
-def _per_game(total: float, games: int) -> float:
-    if games == 0:
-        return 0.0
-    return total / games
+def possessions(fga: float, offensive_rebounds: float, turnovers: float, fta: float) -> float:
+    """Estimated possessions: field-goal attempts, offensive rebounds, turnovers, free throws."""
+
+    return fga - offensive_rebounds + turnovers + FTA_POSSESSION_WEIGHT * fta
+
+
+def _per_hundred(points: float, poss: float) -> float | None:
+    if poss <= 0:
+        return None
+    return 100.0 * points / poss
 
 
 def _pct(made: float, attempts: float) -> float | None:
@@ -130,24 +160,146 @@ def _pct(made: float, attempts: float) -> float | None:
     return made / attempts
 
 
-def _recent_win_rate(results: list[int]) -> float:
-    if not results:
+def _diff(home: float | None, away: float | None) -> float | None:
+    """Home minus away. Missing on either side stays missing."""
+
+    if home is None or away is None:
+        return None
+    return home - away
+
+
+def _observed_rate(wins: int, games: int) -> float | None:
+    if games == 0:
+        return None
+    return wins / games
+
+
+def _shrink(
+    current: float | None,
+    current_games: int,
+    previous: float | None,
+    prior: float | None,
+) -> float | None:
+    """Pull a current-season rate toward the previous season by a fixed number of games.
+
+    With no current games the value is the previous season. A team with no previous
+    season uses the league prior. With neither, the current rate stands on its own.
+    """
+
+    anchor = previous if previous is not None else prior
+    if current_games <= 0 or current is None:
+        return anchor
+    if anchor is None:
+        return current
+    return (current_games * current + SHRINK_PSEUDO_GAMES * anchor) / (
+        current_games + SHRINK_PSEUDO_GAMES
+    )
+
+
+def _bucket_rates(bucket: SeasonBucket) -> dict[str, float | None]:
+    venue_home = _observed_rate(bucket.home_wins, bucket.home_games)
+    venue_away = _observed_rate(bucket.away_wins, bucket.away_games)
+    if bucket.games > 0 and bucket.home_games == 0:
+        venue_home = 0.5
+    if bucket.games > 0 and bucket.away_games == 0:
+        venue_away = 0.5
+    return {
+        "games": float(bucket.games),
+        "win_rate": _observed_rate(bucket.wins, bucket.games),
+        "offensive_rating": _per_hundred(bucket.rated_points_for, bucket.poss_for),
+        "defensive_rating": _per_hundred(bucket.rated_points_against, bucket.poss_against),
+        "efg_pct": _pct(bucket.fg_value_for, bucket.fga_for),
+        "turnover_pct": _pct(bucket.turnover_numer, bucket.turnover_denom),
+        "rebound_pct": _pct(bucket.rebounds_for, bucket.rebounds_for + bucket.rebounds_against),
+        "rated_games": bucket.rated_games,
+        "shooting_games": bucket.shooting_games,
+        "rebound_games": bucket.rebound_games,
+        "home_games": bucket.home_games,
+        "away_games": bucket.away_games,
+        "home_win_rate": venue_home,
+        "away_win_rate": venue_away,
+    }
+
+
+def _league_prior(bucket: LeagueSeason | None) -> dict[str, float | None]:
+    if bucket is None or bucket.games == 0:
+        return {
+            "win_rate": 0.5,
+            "home_win_rate": None,
+            "away_win_rate": None,
+            "offensive_rating": None,
+            "defensive_rating": None,
+            "efg_pct": None,
+            "turnover_pct": None,
+            "rebound_pct": 0.5,
+        }
+    home_win_rate = bucket.home_wins / bucket.games
+    rating = _per_hundred(bucket.points, bucket.possessions)
+    return {
+        "win_rate": 0.5,
+        "home_win_rate": home_win_rate,
+        "away_win_rate": 1.0 - home_win_rate,
+        "offensive_rating": rating,
+        "defensive_rating": rating,
+        "efg_pct": _pct(bucket.fg_value, bucket.fga),
+        "turnover_pct": _pct(bucket.turnover_numer, bucket.turnover_denom),
+        "rebound_pct": 0.5,
+    }
+
+
+def _recent_sample(games: list[RecentGame]) -> list[RecentGame]:
+    return games[-RECENT_FORM_WINDOW:]
+
+
+def _recent_win_rate(games: list[RecentGame]) -> float:
+    sample = _recent_sample(games)
+    if not sample:
         return 0.5
-    sample = results[-RECENT_FORM_WINDOW:]
-    return sum(sample) / len(sample)
+    return sum(game.won for game in sample) / len(sample)
 
 
-def shot_quality_share(fg_value_for: float, fga_for: float, fg_value_against: float, fga_against: float) -> float | None:
-    """Attempt-weighted effective field-goal share, the stand-in for hockey xGoal share."""
+def _recent_residual(games: list[RecentGame]) -> float:
+    """Mean of win minus pregame Elo win probability. No games is 0."""
 
-    if fga_for <= 0 or fga_against <= 0:
+    sample = _recent_sample(games)
+    if not sample:
+        return 0.0
+    return sum(game.residual for game in sample) / len(sample)
+
+
+def _recent_adjusted(games: list[RecentGame], *, offensive: bool) -> float | None:
+    """Mean opponent-adjusted rating inside the last 10 games.
+
+    A game with no box line, or an opponent who had no pregame rating, is left
+    out. The mean is missing when none of the last 10 games qualify.
+    """
+
+    sample = _recent_sample(games)
+    values = [game.offensive_adj if offensive else game.defensive_adj for game in sample]
+    finite = [value for value in values if value is not None]
+    if not finite:
         return None
-    efg_for = fg_value_for / fga_for
-    efg_against = fg_value_against / fga_against
-    total = efg_for + efg_against
-    if total <= 0:
+    return sum(finite) / len(finite)
+
+
+def _game_ratings(game: Game, is_home: bool) -> tuple[float | None, float | None]:
+    """This game's offensive and defensive rating. Missing when the box is incomplete."""
+
+    points_for = game.home_score if is_home else game.away_score
+    points_against = game.away_score if is_home else game.home_score
+    own_fga, own_orb, own_tov, own_fta, _own_rebounds = _box_line(game, is_home)
+    opp_fga, opp_orb, opp_tov, opp_fta, _opp_rebounds = _box_line(game, not is_home)
+    if None in (own_fga, own_orb, own_tov, own_fta, opp_fga, opp_orb, opp_tov, opp_fta):
+        return None, None
+    offensive = _per_hundred(float(points_for), possessions(own_fga, own_orb, own_tov, own_fta))
+    defensive = _per_hundred(float(points_against), possessions(opp_fga, opp_orb, opp_tov, opp_fta))
+    return offensive, defensive
+
+
+def _adjusted(game_rating: float | None, opponent_rating: float | None) -> float | None:
+    if game_rating is None or opponent_rating is None:
         return None
-    return efg_for / total
+    return game_rating - opponent_rating
 
 
 def field_goal_value(fg: int, fg3: int) -> float:
@@ -179,42 +331,83 @@ def ratings_from_events(events: list[EloEvent], season_start: int) -> dict[str, 
     return ratings
 
 
-def _side(state: TeamState, season_start: int, *, at_home: bool) -> dict[str, float | None]:
+def _window_ratings(state: TeamState, season_start: int) -> tuple[float | None, float | None]:
+    """Four-season offensive and defensive rating, for the last-10 opponent adjustment."""
+
     window = _window_bucket(state, season_start)
-    current = state.season_buckets.get(season_start, SeasonBucket())
-    venue_wins = window.home_wins if at_home else window.away_wins
-    venue_games = window.home_games if at_home else window.away_games
+    return (
+        _per_hundred(window.rated_points_for, window.poss_for),
+        _per_hundred(window.rated_points_against, window.poss_against),
+    )
+
+
+def _profile(
+    state: TeamState,
+    season_start: int,
+    *,
+    at_home: bool,
+    prior: dict[str, float | None],
+) -> dict[str, float | None]:
+    previous = _bucket_rates(state.season_buckets.get(season_start - 1, SeasonBucket()))
+    current = _bucket_rates(state.season_buckets.get(season_start, SeasonBucket()))
+    venue_key = "home_win_rate" if at_home else "away_win_rate"
+    venue_games_key = "home_games" if at_home else "away_games"
+    venue_prior_key = "home_win_rate" if at_home else "away_win_rate"
+
+    def shrunk(name: str, games_key: str, prior_key: str) -> float | None:
+        return _shrink(
+            current[name],
+            int(current[games_key]),
+            previous[name],
+            prior[prior_key],
+        )
+
     return {
-        "prior_games": float(window.games),
-        "win_rate": _rate(window.wins, window.games),
-        "points_for_per_game": _per_game(window.points_for, window.games),
-        "points_against_per_game": _per_game(window.points_against, window.games),
-        "venue_win_rate": _rate(venue_wins, venue_games),
-        "season_games": float(current.games),
-        "season_win_rate": _rate(current.wins, current.games),
-        "recent_win_rate": _recent_win_rate(state.recent_results),
-        "shot_quality_share": shot_quality_share(
-            window.fg_value_for,
-            window.fga_for,
-            window.fg_value_against,
-            window.fga_against,
-        ),
-        "field_goal_pct": _pct(window.fg_made_for, window.fga_for),
-        "three_point_pct": _pct(window.fg3_made_for, window.fg3a_for),
-        "turnovers_per_game": _pct(window.turnovers_for, window.turnover_games),
-        "rebounds_per_game": _pct(window.rebounds_for, window.rebound_games),
+        "prev_games": previous["games"],
+        "prev_win_rate": previous["win_rate"],
+        "prev_offensive_rating": previous["offensive_rating"],
+        "prev_defensive_rating": previous["defensive_rating"],
+        "prev_efg_pct": previous["efg_pct"],
+        "prev_turnover_pct": previous["turnover_pct"],
+        "prev_rebound_pct": previous["rebound_pct"],
+        "prev_venue_win_rate": previous[venue_key],
+        "season_games": current["games"],
+        "season_win_rate": shrunk("win_rate", "games", "win_rate"),
+        "season_offensive_rating": shrunk("offensive_rating", "rated_games", "offensive_rating"),
+        "season_defensive_rating": shrunk("defensive_rating", "rated_games", "defensive_rating"),
+        "season_efg_pct": shrunk("efg_pct", "shooting_games", "efg_pct"),
+        "season_turnover_pct": shrunk("turnover_pct", "rated_games", "turnover_pct"),
+        "season_rebound_pct": shrunk("rebound_pct", "rebound_games", "rebound_pct"),
+        "season_venue_win_rate": shrunk(venue_key, venue_games_key, venue_prior_key),
+        "recent_win_rate": _recent_win_rate(state.recent_games),
+        "recent_residual": _recent_residual(state.recent_games),
+        "recent_offensive_rating": _recent_adjusted(state.recent_games, offensive=True),
+        "recent_defensive_rating": _recent_adjusted(state.recent_games, offensive=False),
     }
 
 
-def _apply(state: TeamState, game: Game, *, is_home: bool) -> None:
+def _box_line(game: Game, is_home: bool) -> tuple[int | None, int | None, int | None, int | None, int | None]:
+    if is_home:
+        return game.home_fga, game.home_orb, game.home_turnovers, game.home_fta, game.home_rebounds
+    return game.away_fga, game.away_orb, game.away_turnovers, game.away_fta, game.away_rebounds
+
+
+def _apply(
+    state: TeamState,
+    game: Game,
+    *,
+    is_home: bool,
+    own_elo: float,
+    opponent_elo: float,
+    opponent_offensive_rating: float | None,
+    opponent_defensive_rating: float | None,
+) -> None:
     won = game.home_win if is_home else 1 - game.home_win
     points_for = game.home_score if is_home else game.away_score
     points_against = game.away_score if is_home else game.home_score
     bucket = state.season_buckets.setdefault(game.season_start, SeasonBucket())
     bucket.games += 1
     bucket.wins += won
-    bucket.points_for += float(points_for)
-    bucket.points_against += float(points_against)
     if is_home:
         bucket.home_games += 1
         bucket.home_wins += won
@@ -225,53 +418,85 @@ def _apply(state: TeamState, game: Game, *, is_home: bool) -> None:
         fg = game.home_fg if is_home else game.away_fg
         fga = game.home_fga if is_home else game.away_fga
         fg3 = game.home_fg3 if is_home else game.away_fg3
-        opp_fg = game.away_fg if is_home else game.home_fg
-        opp_fga = game.away_fga if is_home else game.home_fga
-        opp_fg3 = game.away_fg3 if is_home else game.home_fg3
         bucket.fg_value_for += field_goal_value(fg, fg3)
         bucket.fga_for += fga
-        bucket.fg_made_for += fg
-        bucket.fg_value_against += field_goal_value(opp_fg, opp_fg3)
-        bucket.fga_against += opp_fga
-    fg3 = game.home_fg3 if is_home else game.away_fg3
-    fg3a = game.home_fg3a if is_home else game.away_fg3a
-    if fg3 is not None and fg3a is not None:
-        bucket.fg3_made_for += fg3
-        bucket.fg3a_for += fg3a
-    rebounds = game.home_rebounds if is_home else game.away_rebounds
-    if rebounds is not None:
-        bucket.rebounds_for += rebounds
+        bucket.shooting_games += 1
+    own_fga, own_orb, own_tov, own_fta, own_reb = _box_line(game, is_home)
+    opp_fga, opp_orb, opp_tov, opp_fta, opp_reb = _box_line(game, not is_home)
+    if None not in (own_fga, own_orb, own_tov, own_fta, opp_fga, opp_orb, opp_tov, opp_fta):
+        bucket.poss_for += possessions(own_fga, own_orb, own_tov, own_fta)
+        bucket.poss_against += possessions(opp_fga, opp_orb, opp_tov, opp_fta)
+        bucket.rated_points_for += float(points_for)
+        bucket.rated_points_against += float(points_against)
+        bucket.turnover_numer += own_tov
+        bucket.turnover_denom += own_fga + FTA_POSSESSION_WEIGHT * own_fta + own_tov
+        bucket.rated_games += 1
+    if own_reb is not None and opp_reb is not None:
+        bucket.rebounds_for += own_reb
+        bucket.rebounds_against += opp_reb
         bucket.rebound_games += 1
-    turnovers = game.home_turnovers if is_home else game.away_turnovers
-    if turnovers is not None:
-        bucket.turnovers_for += turnovers
-        bucket.turnover_games += 1
-    state.recent_results.append(won)
+    offensive, defensive = _game_ratings(game, is_home)
+    state.recent_games.append(
+        RecentGame(
+            won=won,
+            residual=won - expected_score(own_elo, opponent_elo),
+            offensive_adj=_adjusted(offensive, opponent_defensive_rating),
+            defensive_adj=_adjusted(defensive, opponent_offensive_rating),
+        )
+    )
     state.game_dates.append(game.game_date)
 
 
-def _row(game: Game, states: dict[str, TeamState], ratings: dict[str, float]) -> dict[str, object]:
-    home = _side(states[game.home_team], game.season_start, at_home=True)
-    away = _side(states[game.away_team], game.season_start, at_home=False)
+def _accumulate_league(bucket: LeagueSeason, game: Game) -> None:
+    bucket.games += 1
+    bucket.home_wins += game.home_win
+    if game.has_shooting:
+        bucket.fg_value += field_goal_value(game.home_fg, game.home_fg3) + field_goal_value(
+            game.away_fg, game.away_fg3
+        )
+        bucket.fga += game.home_fga + game.away_fga
+    home_line = _box_line(game, True)
+    away_line = _box_line(game, False)
+    if None not in home_line[:4] and None not in away_line[:4]:
+        home_poss = possessions(*home_line[:4])
+        away_poss = possessions(*away_line[:4])
+        bucket.points += float(game.home_score + game.away_score)
+        bucket.possessions += home_poss + away_poss
+        bucket.turnover_numer += home_line[2] + away_line[2]
+        bucket.turnover_denom += (
+            home_line[0] + FTA_POSSESSION_WEIGHT * home_line[3] + home_line[2]
+            + away_line[0] + FTA_POSSESSION_WEIGHT * away_line[3] + away_line[2]
+        )
+
+
+def _row(
+    game: Game,
+    states: dict[str, TeamState],
+    ratings: dict[str, float],
+    prior: dict[str, float | None],
+) -> dict[str, object]:
+    home = _profile(states[game.home_team], game.season_start, at_home=True, prior=prior)
+    away = _profile(states[game.away_team], game.season_start, at_home=False, prior=prior)
     home_b2b, home_7d = _fatigue(states[game.home_team].game_dates, game.game_date)
     away_b2b, away_7d = _fatigue(states[game.away_team].game_dates, game.game_date)
-    home_share = home["shot_quality_share"]
-    away_share = away["shot_quality_share"]
-    def _ready(side: dict[str, float]) -> bool:
+
+    def _ready(side: dict[str, float | None]) -> bool:
         return all(
             side[name] is not None
             for name in (
-                "shot_quality_share",
-                "field_goal_pct",
-                "three_point_pct",
-                "turnovers_per_game",
-                "rebounds_per_game",
+                "prev_offensive_rating",
+                "prev_defensive_rating",
+                "prev_efg_pct",
+                "prev_turnover_pct",
+                "prev_rebound_pct",
+                "recent_offensive_rating",
+                "recent_defensive_rating",
             )
         )
 
     eligible = int(
-        home["prior_games"] >= MIN_PRIOR_GAMES
-        and away["prior_games"] >= MIN_PRIOR_GAMES
+        home["prev_games"] >= MIN_PRIOR_GAMES
+        and away["prev_games"] >= MIN_PRIOR_GAMES
         and _ready(home)
         and _ready(away)
     )
@@ -285,33 +510,35 @@ def _row(game: Game, states: dict[str, TeamState], ratings: dict[str, float]) ->
         "away_score": game.away_score,
         "home_win": game.home_win,
         "eligible": eligible,
-        "home_prior_games": home["prior_games"],
-        "away_prior_games": away["prior_games"],
-        "home_win_rate": home["win_rate"],
-        "away_win_rate": away["win_rate"],
-        "home_points_for_per_game": home["points_for_per_game"],
-        "away_points_for_per_game": away["points_for_per_game"],
-        "home_points_against_per_game": home["points_against_per_game"],
-        "away_points_against_per_game": away["points_against_per_game"],
-        "home_field_goal_pct": home["field_goal_pct"],
-        "away_field_goal_pct": away["field_goal_pct"],
-        "home_three_point_pct": home["three_point_pct"],
-        "away_three_point_pct": away["three_point_pct"],
-        "home_turnovers_per_game": home["turnovers_per_game"],
-        "away_turnovers_per_game": away["turnovers_per_game"],
-        "home_rebounds_per_game": home["rebounds_per_game"],
-        "away_rebounds_per_game": away["rebounds_per_game"],
-        "home_home_win_rate": home["venue_win_rate"],
-        "away_away_win_rate": away["venue_win_rate"],
+        "home_prev_games": home["prev_games"],
+        "away_prev_games": away["prev_games"],
+        "prev_win_rate_diff": _diff(home["prev_win_rate"], away["prev_win_rate"]),
+        "prev_offensive_rating_diff": _diff(home["prev_offensive_rating"], away["prev_offensive_rating"]),
+        "prev_defensive_rating_diff": _diff(home["prev_defensive_rating"], away["prev_defensive_rating"]),
+        "prev_efg_pct_diff": _diff(home["prev_efg_pct"], away["prev_efg_pct"]),
+        "prev_turnover_pct_diff": _diff(home["prev_turnover_pct"], away["prev_turnover_pct"]),
+        "prev_rebound_pct_diff": _diff(home["prev_rebound_pct"], away["prev_rebound_pct"]),
+        "prev_home_home_win_rate": home["prev_venue_win_rate"],
+        "prev_away_away_win_rate": away["prev_venue_win_rate"],
         "home_season_games": home["season_games"],
         "away_season_games": away["season_games"],
-        "home_season_win_rate": home["season_win_rate"],
-        "away_season_win_rate": away["season_win_rate"],
-        "home_recent_win_rate": home["recent_win_rate"],
-        "away_recent_win_rate": away["recent_win_rate"],
+        "season_win_rate_diff": _diff(home["season_win_rate"], away["season_win_rate"]),
+        "season_offensive_rating_diff": _diff(home["season_offensive_rating"], away["season_offensive_rating"]),
+        "season_defensive_rating_diff": _diff(home["season_defensive_rating"], away["season_defensive_rating"]),
+        "season_efg_pct_diff": _diff(home["season_efg_pct"], away["season_efg_pct"]),
+        "season_turnover_pct_diff": _diff(home["season_turnover_pct"], away["season_turnover_pct"]),
+        "season_rebound_pct_diff": _diff(home["season_rebound_pct"], away["season_rebound_pct"]),
+        "season_home_home_win_rate": home["season_venue_win_rate"],
+        "season_away_away_win_rate": away["season_venue_win_rate"],
+        "recent_win_rate_diff": _diff(home["recent_win_rate"], away["recent_win_rate"]),
+        "recent_result_residual_diff": _diff(home["recent_residual"], away["recent_residual"]),
+        "recent_offensive_rating_diff": _diff(
+            home["recent_offensive_rating"], away["recent_offensive_rating"]
+        ),
+        "recent_defensive_rating_diff": _diff(
+            home["recent_defensive_rating"], away["recent_defensive_rating"]
+        ),
         "home_elo_minus_away_elo": ratings[game.home_team] - ratings[game.away_team],
-        "home_shot_quality_share": home_share,
-        "away_shot_quality_share": away_share,
         "home_back_to_back": home_b2b,
         "away_back_to_back": away_b2b,
         "home_games_prior_7d": home_7d,
@@ -319,10 +546,13 @@ def _row(game: Game, states: dict[str, TeamState], ratings: dict[str, float]) ->
     }
 
 
-def _walk(games: list[Game]) -> tuple[list[dict[str, object]], dict[str, TeamState], list[EloEvent]]:
+def _walk(
+    games: list[Game],
+) -> tuple[list[dict[str, object]], dict[str, TeamState], list[EloEvent], dict[int, LeagueSeason]]:
     ordered = sorted(games, key=lambda game: (game.game_date, game.game_id))
     states: dict[str, TeamState] = defaultdict(TeamState)
     events: list[EloEvent] = []
+    league: dict[int, LeagueSeason] = defaultdict(LeagueSeason)
     rows: list[dict[str, object]] = []
     index = 0
     while index < len(ordered):
@@ -336,10 +566,39 @@ def _walk(games: list[Game]) -> tuple[list[dict[str, object]], dict[str, TeamSta
             for season in {game.season_start for game in day_games}
         }
         for game in day_games:
-            rows.append(_row(game, states, ratings_by_season[game.season_start]))
+            rows.append(
+                _row(
+                    game,
+                    states,
+                    ratings_by_season[game.season_start],
+                    _league_prior(league.get(game.season_start - 1)),
+                )
+            )
         for game in day_games:
-            _apply(states[game.home_team], game, is_home=True)
-            _apply(states[game.away_team], game, is_home=False)
+            ratings = ratings_by_season[game.season_start]
+            home_state = states[game.home_team]
+            away_state = states[game.away_team]
+            home_off, home_def = _window_ratings(home_state, game.season_start)
+            away_off, away_def = _window_ratings(away_state, game.season_start)
+            _apply(
+                home_state,
+                game,
+                is_home=True,
+                own_elo=ratings[game.home_team],
+                opponent_elo=ratings[game.away_team],
+                opponent_offensive_rating=away_off,
+                opponent_defensive_rating=away_def,
+            )
+            _apply(
+                away_state,
+                game,
+                is_home=False,
+                own_elo=ratings[game.away_team],
+                opponent_elo=ratings[game.home_team],
+                opponent_offensive_rating=home_off,
+                opponent_defensive_rating=home_def,
+            )
+            _accumulate_league(league[game.season_start], game)
             events.append(
                 EloEvent(
                     season_start=game.season_start,
@@ -349,7 +608,7 @@ def _walk(games: list[Game]) -> tuple[list[dict[str, object]], dict[str, TeamSta
                 )
             )
         index = end
-    return rows, states, events
+    return rows, states, events, league
 
 
 def _as_feature_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
@@ -365,18 +624,26 @@ def _as_feature_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
 def build_feature_frame(games: list[Game]) -> pd.DataFrame:
     """Return one row per game, including ineligible rows."""
 
-    rows, _states, _events = _walk(games)
+    rows, _states, _events, _league = _walk(games)
     return _as_feature_frame(rows)
 
 
 def snapshot_features(history: list[Game], slate: list[Game]) -> pd.DataFrame:
     """Features for slate games. Slate scores are not applied."""
 
-    _rows, states, events = _walk(history)
+    _rows, states, events, league = _walk(history)
     ordered = sorted(slate, key=lambda game: (game.game_date, game.game_id))
     ratings_by_season = {
         season: ratings_from_events(events, season) for season in {game.season_start for game in ordered}
     }
     return _as_feature_frame(
-        [_row(game, states, ratings_by_season[game.season_start]) for game in ordered]
+        [
+            _row(
+                game,
+                states,
+                ratings_by_season[game.season_start],
+                _league_prior(league.get(game.season_start - 1)),
+            )
+            for game in ordered
+        ]
     )

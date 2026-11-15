@@ -7,9 +7,12 @@ from dataclasses import replace
 from datetime import date, timedelta
 
 from nba_moneyline.acquire import turnovers_from_summary
-from nba_moneyline.constants import FEATURE_COLUMNS, PRIOR_SEASON_WINDOW
+from nba_moneyline.constants import FEATURE_COLUMNS, PRIOR_SEASON_WINDOW, SHRINK_PSEUDO_GAMES
 from nba_moneyline.features import (
+    FTA_POSSESSION_WEIGHT,
     build_feature_frame,
+    expected_score,
+    possessions,
     seasons_in_prior_window,
     snapshot_features,
     updated_ratings,
@@ -36,6 +39,10 @@ def _game(
     away_fg3a: int = 36,
     home_rebounds: int = 44,
     away_rebounds: int = 41,
+    home_orb: int = 10,
+    away_orb: int = 8,
+    home_fta: int = 20,
+    away_fta: int = 18,
     home_turnovers: int = 12,
     away_turnovers: int = 15,
 ) -> Game:
@@ -58,6 +65,10 @@ def _game(
         away_fg3a=away_fg3a,
         home_rebounds=home_rebounds,
         away_rebounds=away_rebounds,
+        home_orb=home_orb,
+        away_orb=away_orb,
+        home_fta=home_fta,
+        away_fta=away_fta,
         home_turnovers=home_turnovers,
         away_turnovers=away_turnovers,
     )
@@ -65,19 +76,34 @@ def _game(
 
 class FeatureTests(unittest.TestCase):
     def test_column_contract(self) -> None:
-        self.assertEqual(len(FEATURE_COLUMNS), 31)
-        self.assertIn("home_field_goal_pct", FEATURE_COLUMNS)
-        self.assertIn("home_three_point_pct", FEATURE_COLUMNS)
-        self.assertIn("home_turnovers_per_game", FEATURE_COLUMNS)
-        self.assertIn("home_rebounds_per_game", FEATURE_COLUMNS)
+        self.assertEqual(len(FEATURE_COLUMNS), 29)
+        self.assertIn("prev_offensive_rating_diff", FEATURE_COLUMNS)
+        self.assertIn("prev_defensive_rating_diff", FEATURE_COLUMNS)
+        self.assertIn("season_offensive_rating_diff", FEATURE_COLUMNS)
+        self.assertIn("season_efg_pct_diff", FEATURE_COLUMNS)
+        self.assertIn("season_turnover_pct_diff", FEATURE_COLUMNS)
+        self.assertIn("season_rebound_pct_diff", FEATURE_COLUMNS)
+        self.assertNotIn("offensive_rating_diff", FEATURE_COLUMNS)
+        self.assertNotIn("win_rate_diff", FEATURE_COLUMNS)
+        self.assertNotIn("home_prior_games", FEATURE_COLUMNS)
+        self.assertNotIn("points_for_diff", FEATURE_COLUMNS)
+        self.assertNotIn("shot_quality_share_diff", FEATURE_COLUMNS)
+        self.assertNotIn("net_rating_diff", FEATURE_COLUMNS)
+        self.assertEqual(SHRINK_PSEUDO_GAMES, 10)
         self.assertEqual(PRIOR_SEASON_WINDOW, 4)
         self.assertEqual(
             seasons_in_prior_window(2025),
             frozenset({2025, 2024, 2023, 2022}),
         )
-        self.assertIn("home_shot_quality_share", FEATURE_COLUMNS)
-        self.assertIn("home_recent_win_rate", FEATURE_COLUMNS)
-        self.assertIn("home_points_for_per_game", FEATURE_COLUMNS)
+        self.assertIn("recent_win_rate_diff", FEATURE_COLUMNS)
+        self.assertIn("recent_result_residual_diff", FEATURE_COLUMNS)
+        self.assertIn("recent_offensive_rating_diff", FEATURE_COLUMNS)
+        self.assertIn("recent_defensive_rating_diff", FEATURE_COLUMNS)
+        self.assertNotIn("recent_net_rating_diff", FEATURE_COLUMNS)
+        self.assertIn("prev_home_home_win_rate", FEATURE_COLUMNS)
+        self.assertIn("season_home_home_win_rate", FEATURE_COLUMNS)
+        self.assertNotIn("home_home_win_rate", FEATURE_COLUMNS)
+        self.assertIn("home_back_to_back", FEATURE_COLUMNS)
         self.assertNotIn("home_recent_extra_time_rate", FEATURE_COLUMNS)
         self.assertNotIn("home_recent_extra_time_wins", FEATURE_COLUMNS)
 
@@ -97,7 +123,7 @@ class FeatureTests(unittest.TestCase):
         self.assertTrue((day["home_elo_minus_away_elo"] == 0).all())
         bos = frame.loc[frame["game_id"] == later.game_id].iloc[0]
         self.assertGreater(bos["home_elo_minus_away_elo"], 0)
-        self.assertLess(bos["away_win_rate"], 0.5)
+        self.assertGreater(bos["season_win_rate_diff"], 0)
 
     def test_back_to_back_resets_at_the_season_boundary(self) -> None:
         opener = Game(
@@ -155,12 +181,13 @@ class FeatureTests(unittest.TestCase):
         following_row = frame.loc[frame["game_id"] == next_day.game_id].iloc[0]
         self.assertEqual(opening_row["home_back_to_back"], 0)
         self.assertEqual(opening_row["home_season_games"], 0)
-        self.assertEqual(opening_row["home_season_win_rate"], 0.5)
-        self.assertGreater(opening_row["home_win_rate"], 0.5)
+        self.assertEqual(opening_row["season_win_rate_diff"], 1.0)
+        self.assertEqual(opening_row["prev_win_rate_diff"], 1.0)
         self.assertEqual(following_row["home_back_to_back"], 1)
         self.assertEqual(following_row["home_season_games"], 1)
-        self.assertEqual(opening_row["home_prior_games"], 6)
-        self.assertEqual(opening_row["home_home_win_rate"], 1.0)
+        self.assertEqual(opening_row["home_prev_games"], 6)
+        self.assertEqual(opening_row["prev_home_home_win_rate"], 1.0)
+        self.assertEqual(opening_row["season_home_home_win_rate"], 1.0)
 
     def test_four_season_window_drops_older_results_and_counts_recent_load(self) -> None:
         old = [
@@ -219,11 +246,10 @@ class FeatureTests(unittest.TestCase):
             away_fg3=12,
         )
         row = build_feature_frame(old + recent + [opener]).iloc[-1]
-        self.assertEqual(row["home_prior_games"], 3)
-        self.assertEqual(row["home_win_rate"], 0.0)
-        self.assertEqual(row["away_win_rate"], 1.0)
-        self.assertEqual(row["home_points_for_per_game"], 100)
-        self.assertAlmostEqual(row["home_recent_win_rate"], 0.7)
+        self.assertEqual(row["home_prev_games"], 3)
+        self.assertEqual(row["prev_win_rate_diff"], -1.0)
+        self.assertEqual(row["season_win_rate_diff"], -1.0)
+        self.assertAlmostEqual(row["recent_win_rate_diff"], 0.4)
         self.assertEqual(row["home_games_prior_7d"], 3)
         self.assertEqual(row["away_games_prior_7d"], 3)
         self.assertEqual(row["home_back_to_back"], 1)
@@ -327,13 +353,17 @@ class FeatureTests(unittest.TestCase):
             home_turnovers=30,
         )
         row = build_feature_frame(history + [later]).iloc[-1]
-        self.assertAlmostEqual(row["home_points_for_per_game"], 110)
-        self.assertAlmostEqual(row["home_field_goal_pct"], 0.5)
-        self.assertAlmostEqual(row["home_three_point_pct"], 10 / 30)
-        self.assertAlmostEqual(row["home_rebounds_per_game"], 44)
-        self.assertAlmostEqual(row["home_turnovers_per_game"], 12)
-        self.assertAlmostEqual(row["away_field_goal_pct"], 36 / 84)
-        self.assertAlmostEqual(row["away_turnovers_per_game"], 15)
+        home_poss = possessions(80, 10, 12, 20)
+        away_poss = possessions(84, 8, 15, 18)
+        self.assertAlmostEqual(row["season_offensive_rating_diff"], 100 * 110 / home_poss - 100 * 100 / away_poss)
+        self.assertAlmostEqual(row["season_defensive_rating_diff"], 100 * 100 / away_poss - 100 * 110 / home_poss)
+        self.assertAlmostEqual(row["season_efg_pct_diff"], (40 + 0.5 * 10) / 80 - (36 + 0.5 * 12) / 84)
+        home_tov = 12 / (80 + FTA_POSSESSION_WEIGHT * 20 + 12)
+        away_tov = 15 / (84 + FTA_POSSESSION_WEIGHT * 18 + 15)
+        self.assertAlmostEqual(row["season_turnover_pct_diff"], home_tov - away_tov)
+        home_rebound = (4 * (44 / 85) + SHRINK_PSEUDO_GAMES * 0.5) / (4 + SHRINK_PSEUDO_GAMES)
+        away_rebound = (4 * (41 / 85) + SHRINK_PSEUDO_GAMES * 0.5) / (4 + SHRINK_PSEUDO_GAMES)
+        self.assertAlmostEqual(row["season_rebound_pct_diff"], home_rebound - away_rebound)
 
     def test_turnovers_come_from_the_summary_team_box(self) -> None:
         home, away = turnovers_from_summary(
@@ -347,6 +377,86 @@ class FeatureTests(unittest.TestCase):
             }
         )
         self.assertEqual((home, away), (11, 9))
+
+    def test_recent_form_uses_pregame_opponent_strength(self) -> None:
+        seed = _game(0, "NYK", "GSW")
+        lakers = _game(1, "LAL", "GSW")
+        celtics = _game(2, "BOS", "NYK")
+        missing = replace(_game(3, "BOS", "NYK"), home_turnovers=None, away_turnovers=None)
+        row = build_feature_frame([seed, lakers, celtics, missing, _game(5, "BOS", "LAL")]).iloc[-1]
+
+        home_poss = possessions(80, 10, 12, 20)
+        away_poss = possessions(84, 8, 15, 18)
+        nyk_ortg = 100 * 110 / home_poss
+        nyk_drtg = 100 * 100 / away_poss
+        bos_off = 100 * 110 / home_poss - nyk_drtg
+        bos_def = 100 * 100 / away_poss - nyk_ortg
+        self.assertAlmostEqual(row["recent_offensive_rating_diff"], bos_off)
+        self.assertAlmostEqual(row["recent_defensive_rating_diff"], bos_def)
+
+        _nyk_after_seed, gsw_after_seed = updated_ratings(1500, 1500, True)
+        lal_residual = 1 - expected_score(1500, gsw_after_seed)
+        bos_first = 1 - expected_score(1500, 1510)
+        bos_elo, nyk_elo = updated_ratings(1500, 1510, True)
+        bos_second = 1 - expected_score(bos_elo, nyk_elo)
+        self.assertAlmostEqual(
+            row["recent_result_residual_diff"],
+            (bos_first + bos_second) / 2 - lal_residual,
+        )
+
+    def test_current_rates_shrink_toward_the_previous_season(self) -> None:
+        previous = []
+        for index in range(10):
+            previous.append(
+                replace(
+                    _game(index, "BOS", "NYK", season_start=2023),
+                    game_date=date(2024, 3, 1) + timedelta(days=index),
+                    game_id=f"prev-{index}",
+                )
+            )
+        current = []
+        for index in range(5):
+            current.append(
+                replace(
+                    _game(index, "BOS", "NYK", 100, 110, season_start=2024),
+                    game_date=date(2024, 10, 22) + timedelta(days=index),
+                    game_id=f"current-{index}",
+                )
+            )
+        opener = replace(
+            _game(0, "BOS", "NYK", season_start=2024),
+            game_date=date(2024, 10, 21),
+            game_id="opener",
+        )
+        later = replace(
+            _game(0, "BOS", "NYK", season_start=2024),
+            game_date=date(2024, 11, 1),
+            game_id="later",
+        )
+        opening_row = build_feature_frame(previous + [opener]).iloc[-1]
+        later_row = build_feature_frame(previous + current + [later]).iloc[-1]
+        self.assertEqual(opening_row["home_season_games"], 0)
+        self.assertEqual(opening_row["season_win_rate_diff"], 1.0)
+        self.assertEqual(opening_row["prev_win_rate_diff"], 1.0)
+
+        def shrunk(current_rate: float, games: int, previous_rate: float) -> float:
+            return (games * current_rate + SHRINK_PSEUDO_GAMES * previous_rate) / (
+                games + SHRINK_PSEUDO_GAMES
+            )
+
+        self.assertAlmostEqual(later_row["season_win_rate_diff"], shrunk(0.0, 5, 1.0) - shrunk(1.0, 5, 0.0))
+        home_poss = possessions(80, 10, 12, 20)
+        away_poss = possessions(84, 8, 15, 18)
+        bos_prev_off = 100 * 110 / home_poss
+        bos_current_off = 100 * 100 / home_poss
+        nyk_prev_off = 100 * 100 / away_poss
+        nyk_current_off = 100 * 110 / away_poss
+        self.assertAlmostEqual(
+            later_row["season_offensive_rating_diff"],
+            shrunk(bos_current_off, 5, bos_prev_off) - shrunk(nyk_current_off, 5, nyk_prev_off),
+        )
+        self.assertAlmostEqual(later_row["season_home_home_win_rate"], shrunk(0.0, 5, 1.0))
+        self.assertAlmostEqual(later_row["season_away_away_win_rate"], shrunk(1.0, 5, 0.0))
 
     def test_first_games_are_ineligible(self) -> None:
         games = [_game(index * 2, "BOS", "NYK") for index in range(4)]
