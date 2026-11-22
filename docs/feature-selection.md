@@ -1,6 +1,6 @@
 # Feature selection
 
-Pre-game model for whether the home team wins an NBA regular-season game, overtime included. The columns match the hockey model's frozen set except the four overtime and shootout features, plus field-goal percentage, three-point percentage, turnovers per game, and rebounds per game. Shot quality stands in for expected-goal share. Points per game is `points_for_per_game`. Odds are not features.
+Pre-game model for whether the home team wins an NBA regular-season game, overtime included. The columns match the hockey model's frozen set except the four overtime and shootout features. The overlapping box-score rates are replaced by the four factors: effective field-goal percentage, turnovers per possession, offensive-rebound rate, and free-throw rate, each opponent-adjusted. Odds are not features.
 
 The executable column list is `FEATURE_COLUMNS` in `src/nba_moneyline/constants.py`.
 
@@ -12,11 +12,11 @@ A row is one regular-season game. Preseason, play-in, and playoffs are not rows,
 
 The game date is the ESPN slate date, not the UTC tip time. Rows are ordered by that date, then game id. Every game on a date is scored before any result from that date updates team state. A feature may use only games with an earlier date.
 
-A row is eligible for fitting and evaluation when both teams have at least 5 completed regular-season games inside the three-season window before that date, and both shot-quality shares, field-goal percentages, three-point percentages, turnover rates, rebound rates, and last-10 opponent-adjusted offensive and defensive ratings are finite. No feature is imputed. An empty win rate is 0.5. An empty Elo residual is 0. The first game of a season uses 0 games and 0.5 for the season win rate.
+A row is eligible for fitting and evaluation when both teams have at least 5 completed regular-season games inside the three-season window before that date, and both teams' eight adjusted four factors and last-10 opponent-adjusted offensive and defensive ratings are finite. No feature is imputed. An empty win rate is 0.5. The first game of a season uses 0 games and 0.5 for the season win rate.
 
 ## Sample
 
-ESPN daily scoreboards for regular-season games. Each completed game supplies the final score. Most games also supply both teams' field goals, attempts, and threes, which shot quality uses. A game with no shooting line still updates wins, points, fatigue, and Elo. A game with no turnover or rebound line still updates those, and it is left out of the turnover and rebound rates. Play-in and playoff scoreboards are ignored. Neutral-site games are ignored. Team codes are the ESPN abbreviations (`NY`, `GS`, `SA`, `NO`, `UTAH`, `WSH`, `BKN`, `CHA`, `PHX`).
+ESPN daily scoreboards for regular-season games. Each completed game supplies the final score. Most games also supply both teams' field goals, attempts, threes, free-throw attempts, rebounds, offensive rebounds, and turnovers, which the four factors use. A game with no shooting line still updates wins, fatigue, and Elo, and it is left out of the effective-field-goal and free-throw factors. A game with no turnover or rebound line is left out of that factor. Play-in and playoff scoreboards are ignored. Neutral-site games are ignored. Team codes are the ESPN abbreviations (`NY`, `GS`, `SA`, `NO`, `UTAH`, `WSH`, `BKN`, `CHA`, `PHX`).
 
 | Season | Role |
 | --- | --- |
@@ -34,35 +34,41 @@ The training home-win rate is the comparison baseline. It is a constant probabil
 
 ## Features
 
-37 columns. The first 23 match the hockey model except the four overtime and shootout features. Eight more are the team box-score rates below, and six are the last-10 opponent-adjusted form. The three-season window is the current season plus the two before it. Games already played this season count in both the window and the season columns.
+29 columns. Twelve of them are effective field-goal percentage, turnover rate, and offensive-rebound rate, home and away, offense and defense. The three-season window is the current season plus the two before it. Games already played this season count in both the window and the season columns.
+
+Win rates use the same sample-size adjustment. Five fake wins and five fake losses are added before dividing, so a short record is pulled toward 0.5 and a long record stays close to the raw rate. No games yet is 0.5.
 
 ### Last three seasons
 
 Equal-weight counts inside the window. A season older than that is dropped, not decayed.
 
-- `home_prior_games`, `away_prior_games`
-- `home_win_rate`, `away_win_rate`: wins divided by games, home and road together. Empty history is 0.5.
-- `home_points_for_per_game`, `away_points_for_per_game`: points per game. This is the PPG feature.
-- `home_points_against_per_game`, `away_points_against_per_game`
-- `home_field_goal_pct`, `away_field_goal_pct`: field goals made divided by field goals attempted. Makes and attempts are summed inside the window, then divided.
-- `home_three_point_pct`, `away_three_point_pct`: threes made divided by threes attempted, summed the same way.
-- `home_turnovers_per_game`, `away_turnovers_per_game`: turnovers divided by the games that posted a turnover total. A game with no turnover line is left out of this rate.
-- `home_rebounds_per_game`, `away_rebounds_per_game`: total rebounds divided by the games that posted a rebound total.
-- `home_home_win_rate`: the home team's win rate in home games inside the window.
-- `away_away_win_rate`: the away team's win rate in road games inside the window. Empty venue history is 0.5.
-- `home_shot_quality_share`, `away_shot_quality_share`: attempt-weighted effective field-goal percentage scored, divided by that plus the effective field-goal percentage allowed. Counting stats are summed inside the window. This is the stand-in for hockey `prior_xgoal_share`.
+- `home_win_rate`, `away_win_rate`: wins over games inside the window, home and road together, with the five-and-five adjustment. The game count is the adjustment, not its own column.
+- `home_home_win_rate`: the home team's home-game win rate inside the window, with the same adjustment on the home-game count.
+- `away_away_win_rate`: the away team's road-game win rate inside the window, with the same adjustment on the road-game count.
+
+### Four factors
+
+Dean Oliver's four factors, for the offense and for what the team allows. Counting stats for the opponent's pregame rate are summed inside the three-season window, then divided. The feature itself is the equal-weight mean of the per-game adjustments. A game that is missing that factor's line, or whose opponent had no pregame rate, is left out of that mean.
 
 ```text
-efg = (FG + 0.5 * FG3) / FGA
-shot_quality_share = efg_scored / (efg_scored + efg_allowed)
+efg = (FG + 0.5 × threes) / FGA
+tov_rate = turnovers / possessions
+orb_rate = offensive rebounds / (offensive rebounds + opponent defensive rebounds)
+ft_rate = free-throw attempts / FGA
 ```
 
+Defensive rebounds are total rebounds minus offensive rebounds. Possessions are the same estimate as the last-10 ratings.
+
+For each prior game, the offensive adjustment is that game's rate minus the opponent's pregame allowed rate. The defensive adjustment is that game's allowed rate minus the opponent's pregame offensive rate. The opponent rate is the three-season rate entering that game. Positive means the team did more of that thing than the opponent usually allows, or allowed more than the opponent usually does.
+
+- `home_efg_adj`, `away_efg_adj` and `home_efg_allowed_adj`, `away_efg_allowed_adj`
+- `home_tov_rate_adj`, `away_tov_rate_adj` and `home_tov_forced_adj`, `away_tov_forced_adj`. A lower turnover-rate adjustment is better. A higher forced-turnover adjustment is better.
+- `home_orb_rate_adj`, `away_orb_rate_adj` and `home_orb_allowed_adj`, `away_orb_allowed_adj`. A lower allowed-rebound adjustment is better.
 ### This season
 
 Reset when the season changes. October through June is one season, labeled by the starting year (2025 is the 2025–26 season).
 
-- `home_season_games`, `away_season_games`
-- `home_season_win_rate`, `away_season_win_rate`
+- `home_season_win_rate`, `away_season_win_rate`. Wins and games reset with the season, then the five-and-five adjustment is applied. The games-played count is that adjustment, not its own column.
 
 ### Last 10 games
 
@@ -75,7 +81,6 @@ defensive rating = 100 × points allowed / opponent possessions
 ```
 
 - `home_recent_win_rate`, `away_recent_win_rate`. Equal-weight win rate. With no games, the value is 0.5.
-- `home_recent_result_residual`, `away_recent_result_residual`. For each game, the win minus that team's pregame Elo win probability, then the mean. A win over a weak opponent shrinks, and a win over a strong opponent stays large. With no games, the value is 0.
 - `home_recent_offensive_rating`, `away_recent_offensive_rating`. For each game, that game's offensive rating minus the opponent's pregame defensive rating, then the mean. The opponent rating is the three-season rating entering that game. Positive means the team scored more per 100 possessions than the opponent usually allows.
 - `home_recent_defensive_rating`, `away_recent_defensive_rating`. For each game, that game's defensive rating minus the opponent's pregame offensive rating, then the mean. A lower number is better.
 
@@ -94,6 +99,10 @@ The previous game can fall in the prior season. There is no season reset.
 
 ## Considered and left out
 
+- Games played this season, and games played inside the three-season window. Both counts are inside the win-rate adjustment above.
+- The last-10 result residual and free-throw rate. Their weights were near zero once the other columns were in the model.
+- Points per game, field-goal percentage, three-point percentage, shot-quality share, turnovers per game, and total rebounds per game. The four factors replace them.
+- Assists, steals, and blocks. They are on the raw scoreboard extract, not on the game table the features are built from.
 - Overtime and extra-time rate and win counts. Those four columns are the only hockey features left out.
 - A decayed win rate, goal differential, and a separate column for each of the last 10 results.
 - Moneylines, spreads, and totals.

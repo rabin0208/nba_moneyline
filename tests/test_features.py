@@ -10,7 +10,6 @@ from nba_moneyline.acquire import turnovers_from_summary
 from nba_moneyline.constants import FEATURE_COLUMNS, PRIOR_SEASON_WINDOW
 from nba_moneyline.features import (
     build_feature_frame,
-    expected_score,
     possessions,
     seasons_in_prior_window,
     snapshot_features,
@@ -75,27 +74,43 @@ def _game(
 
 class FeatureTests(unittest.TestCase):
     def test_column_contract(self) -> None:
-        self.assertEqual(len(FEATURE_COLUMNS), 37)
-        self.assertIn("home_recent_result_residual", FEATURE_COLUMNS)
-        self.assertIn("away_recent_result_residual", FEATURE_COLUMNS)
+        self.assertEqual(len(FEATURE_COLUMNS), 29)
+        self.assertNotIn("home_prior_games", FEATURE_COLUMNS)
+        self.assertNotIn("away_prior_games", FEATURE_COLUMNS)
+        self.assertNotIn("home_recent_result_residual", FEATURE_COLUMNS)
+        self.assertNotIn("away_recent_result_residual", FEATURE_COLUMNS)
+        self.assertNotIn("home_ft_rate_adj", FEATURE_COLUMNS)
+        self.assertNotIn("away_ft_allowed_adj", FEATURE_COLUMNS)
+        self.assertNotIn("home_season_games", FEATURE_COLUMNS)
+        self.assertIn("home_back_to_back", FEATURE_COLUMNS)
+        self.assertIn("away_back_to_back", FEATURE_COLUMNS)
+        self.assertIn("home_games_prior_7d", FEATURE_COLUMNS)
+        self.assertIn("away_games_prior_7d", FEATURE_COLUMNS)
+        self.assertIn("home_efg_adj", FEATURE_COLUMNS)
+        self.assertIn("home_tov_rate_adj", FEATURE_COLUMNS)
+        self.assertIn("home_orb_rate_adj", FEATURE_COLUMNS)
+        self.assertIn("away_efg_allowed_adj", FEATURE_COLUMNS)
+        self.assertIn("away_tov_forced_adj", FEATURE_COLUMNS)
+        self.assertIn("away_orb_allowed_adj", FEATURE_COLUMNS)
+        self.assertNotIn("home_points_for_per_game", FEATURE_COLUMNS)
+        self.assertNotIn("home_field_goal_pct", FEATURE_COLUMNS)
+        self.assertNotIn("home_three_point_pct", FEATURE_COLUMNS)
+        self.assertNotIn("home_turnovers_per_game", FEATURE_COLUMNS)
+        self.assertNotIn("home_rebounds_per_game", FEATURE_COLUMNS)
+        self.assertNotIn("home_shot_quality_share", FEATURE_COLUMNS)
+        self.assertNotIn("home_days_rest", FEATURE_COLUMNS)
         self.assertIn("home_recent_offensive_rating", FEATURE_COLUMNS)
         self.assertIn("away_recent_offensive_rating", FEATURE_COLUMNS)
         self.assertIn("home_recent_defensive_rating", FEATURE_COLUMNS)
         self.assertIn("away_recent_defensive_rating", FEATURE_COLUMNS)
         self.assertNotIn("recent_net_rating_10", FEATURE_COLUMNS)
         self.assertNotIn("home_recent_net_rating", FEATURE_COLUMNS)
-        self.assertIn("home_field_goal_pct", FEATURE_COLUMNS)
-        self.assertIn("home_three_point_pct", FEATURE_COLUMNS)
-        self.assertIn("home_turnovers_per_game", FEATURE_COLUMNS)
-        self.assertIn("home_rebounds_per_game", FEATURE_COLUMNS)
         self.assertEqual(PRIOR_SEASON_WINDOW, 3)
         self.assertEqual(
             seasons_in_prior_window(2025),
             frozenset({2025, 2024, 2023}),
         )
-        self.assertIn("home_shot_quality_share", FEATURE_COLUMNS)
         self.assertIn("home_recent_win_rate", FEATURE_COLUMNS)
-        self.assertIn("home_points_for_per_game", FEATURE_COLUMNS)
         self.assertNotIn("home_recent_extra_time_rate", FEATURE_COLUMNS)
         self.assertNotIn("home_recent_extra_time_wins", FEATURE_COLUMNS)
 
@@ -172,13 +187,11 @@ class FeatureTests(unittest.TestCase):
         opening_row = frame.loc[frame["game_id"] == opener.game_id].iloc[0]
         following_row = frame.loc[frame["game_id"] == next_day.game_id].iloc[0]
         self.assertEqual(opening_row["home_back_to_back"], 0)
-        self.assertEqual(opening_row["home_season_games"], 0)
         self.assertEqual(opening_row["home_season_win_rate"], 0.5)
         self.assertGreater(opening_row["home_win_rate"], 0.5)
         self.assertEqual(following_row["home_back_to_back"], 1)
-        self.assertEqual(following_row["home_season_games"], 1)
         self.assertEqual(opening_row["home_prior_games"], 6)
-        self.assertEqual(opening_row["home_home_win_rate"], 1.0)
+        self.assertAlmostEqual(opening_row["home_home_win_rate"], 11 / 16)
 
     def test_three_season_window_drops_older_results_and_counts_recent_load(self) -> None:
         old = [
@@ -258,9 +271,8 @@ class FeatureTests(unittest.TestCase):
         )
         row = build_feature_frame(old + dropped + recent + [opener]).iloc[-1]
         self.assertEqual(row["home_prior_games"], 3)
-        self.assertEqual(row["home_win_rate"], 0.0)
-        self.assertEqual(row["away_win_rate"], 1.0)
-        self.assertEqual(row["home_points_for_per_game"], 100)
+        self.assertAlmostEqual(row["home_win_rate"], 5 / 13)
+        self.assertAlmostEqual(row["away_win_rate"], 8 / 13)
         self.assertAlmostEqual(row["home_recent_win_rate"], 0.7)
         self.assertEqual(row["home_games_prior_7d"], 3)
         self.assertEqual(row["away_games_prior_7d"], 3)
@@ -351,27 +363,26 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(lines[0].team, "BOS")
         self.assertAlmostEqual(lines[0].minutes, 30)
 
-    def test_box_rates_ignore_the_current_game_and_a_missing_line(self) -> None:
-        history = [_game(index, "BOS", "NYK") for index in range(3)]
-        history.append(replace(_game(3, "BOS", "NYK"), home_turnovers=None, away_turnovers=None))
-        later = replace(
-            _game(5, "BOS", "NYK"),
-            home_score=140,
-            home_rebounds=80,
-            home_fg=60,
-            home_fga=80,
-            home_fg3=20,
-            home_fg3a=30,
-            home_turnovers=30,
+    def test_four_factors_subtract_the_opponent_pregame_rate(self) -> None:
+        first = _game(0, "BOS", "NYK")
+        # (32 + 0.5 * 8) / 80 = 0.45, against NYK's allowed effective field-goal rate of 0.5625.
+        second = replace(_game(2, "BOS", "NYK"), home_fg=32, home_fg3=8)
+        missing = replace(
+            _game(3, "BOS", "NYK"),
+            home_fg=None,
+            home_fga=None,
+            home_fg3=None,
+            away_fg=None,
+            away_fga=None,
+            away_fg3=None,
+            home_turnovers=None,
+            away_turnovers=None,
         )
-        row = build_feature_frame(history + [later]).iloc[-1]
-        self.assertAlmostEqual(row["home_points_for_per_game"], 110)
-        self.assertAlmostEqual(row["home_field_goal_pct"], 0.5)
-        self.assertAlmostEqual(row["home_three_point_pct"], 10 / 30)
-        self.assertAlmostEqual(row["home_rebounds_per_game"], 44)
-        self.assertAlmostEqual(row["home_turnovers_per_game"], 12)
-        self.assertAlmostEqual(row["away_field_goal_pct"], 36 / 84)
-        self.assertAlmostEqual(row["away_turnovers_per_game"], 15)
+        later = replace(_game(5, "BOS", "NYK"), home_score=140, home_fg=60, home_fg3=20, home_turnovers=30)
+        row = build_feature_frame([first, second, missing, later]).iloc[-1]
+        self.assertAlmostEqual(row["home_efg_adj"], 0.45 - (40 + 0.5 * 10) / 80)
+        # The game with no shooting or turnover line is left out. The second game matches the first turnover rate.
+        self.assertAlmostEqual(row["home_tov_rate_adj"], 0.0)
 
     def test_turnovers_come_from_the_summary_team_box(self) -> None:
         home, away = turnovers_from_summary(
@@ -401,14 +412,6 @@ class FeatureTests(unittest.TestCase):
         self.assertAlmostEqual(row["home_recent_defensive_rating"], 100 * 100 / away_poss - nyk_ortg)
         self.assertAlmostEqual(row["away_recent_offensive_rating"], 0.0)
         self.assertAlmostEqual(row["away_recent_defensive_rating"], 0.0)
-
-        _nyk_after_seed, gsw_after_seed = updated_ratings(1500, 1500, True)
-        lal_residual = 1 - expected_score(1500, gsw_after_seed)
-        bos_first = 1 - expected_score(1500, 1510)
-        bos_elo, nyk_elo = updated_ratings(1500, 1510, True)
-        bos_second = 1 - expected_score(bos_elo, nyk_elo)
-        self.assertAlmostEqual(row["home_recent_result_residual"], (bos_first + bos_second) / 2)
-        self.assertAlmostEqual(row["away_recent_result_residual"], lal_residual)
 
     def test_first_games_are_ineligible(self) -> None:
         games = [_game(index * 2, "BOS", "NYK") for index in range(4)]
