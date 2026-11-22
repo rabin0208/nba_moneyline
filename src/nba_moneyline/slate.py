@@ -116,6 +116,33 @@ def _optional_float(value: object) -> float | None:
         return None
 
 
+_IGNORED_SCHEDULE_STATUSES = {"STATUS_POSTPONED", "STATUS_CANCELED", "STATUS_CANCELLED"}
+
+
+def scheduled_games_before(target: date) -> list[Game]:
+    """Regular-season games on the calendar before `target`, including games not yet played."""
+
+    played = [game for game in read_games() if game.game_date < target]
+    last_included = max((game.game_date for game in played), default=date(2015, 9, 30))
+    found: list[Game] = []
+    day = last_included + timedelta(days=1)
+    while day < target:
+        path = cache_path(day)
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            found.extend(scheduled_games_on(payload, day))
+        day += timedelta(days=1)
+    return found
+
+
+def scheduled_games_on(payload: dict, day: date) -> list[Game]:
+    return [
+        _placeholder(game)
+        for game in games_on_scoreboard(payload, day)
+        if game.status not in _IGNORED_SCHEDULE_STATUSES
+    ]
+
+
 def _finals_on(day: date) -> list[Game]:
     path = cache_path(day)
     if not path.exists():
@@ -212,7 +239,8 @@ def score_slate(target: date, *, today: date | None = None) -> pd.DataFrame:
                 game.away_open = _optional_float(line.get("away_open"))
     _fill_saved_opens(selected)
 
-    features = snapshot_features(history, [_placeholder(game) for game in selected])
+    scheduled = scheduled_games_before(target) if target >= current else None
+    features = snapshot_features(history, [_placeholder(game) for game in selected], scheduled)
     if features.empty:
         return features
     if not MODEL_PATH.is_file():

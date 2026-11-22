@@ -665,11 +665,31 @@ def build_feature_frame(games: list[Game]) -> pd.DataFrame:
     return _as_feature_frame(rows)
 
 
-def snapshot_features(history: list[Game], slate: list[Game]) -> pd.DataFrame:
+def _remember_scheduled_dates(states: dict[str, TeamState], scheduled: list[Game], before: date) -> None:
+    """Count a scheduled game in fatigue. Its result stays out of the other features."""
+
+    dated = sorted(
+        (game for game in scheduled if game.game_date < before),
+        key=lambda game: (game.game_date, game.game_id),
+    )
+    for game in dated:
+        for team in (game.home_team, game.away_team):
+            dates = states[team].game_dates
+            if game.game_date in dates:
+                continue
+            dates.append(game.game_date)
+            dates.sort()
+
+
+def snapshot_features(
+    history: list[Game], slate: list[Game], scheduled: list[Game] | None = None
+) -> pd.DataFrame:
     """Features for slate games. Slate scores are not applied."""
 
     _rows, states, events = _walk(history)
     ordered = sorted(slate, key=lambda game: (game.game_date, game.game_id))
+    if scheduled and ordered:
+        _remember_scheduled_dates(states, scheduled, ordered[0].game_date)
     ratings_by_season = {
         season: ratings_from_events(events, season) for season in {game.season_start for game in ordered}
     }

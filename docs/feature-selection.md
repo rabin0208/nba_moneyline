@@ -97,6 +97,8 @@ The previous game can fall in the prior season. There is no season reset.
 - `home_back_to_back`, `away_back_to_back`: 1 when that team's previous regular-season game was exactly one calendar day earlier.
 - `home_games_prior_7d`, `away_games_prior_7d`: how many of that team's games have a date from 1 to 7 days before this game.
 
+A game that is on the schedule but has not been played yet still counts in these two columns. Its result is left out of every other feature. The 7-day count looks backward from the game being scored.
+
 ## Considered and left out
 
 - Games played this season, and games played inside the three-season window. Both counts are inside the win-rate adjustment above.

@@ -293,6 +293,57 @@ class FeatureTests(unittest.TestCase):
         rebuilt_earlier = rebuilt.iloc[:-1][list(FEATURE_COLUMNS)].reset_index(drop=True)
         self.assertTrue(earlier.equals(rebuilt_earlier))
 
+    def test_scheduled_game_counts_before_it_is_played(self) -> None:
+        played = _game(0, "BOS", "NYK")
+        scheduled = _game(2, "BOS", "LAL", 80, 140)
+        slate = _game(3, "MIA", "BOS")
+        without = snapshot_features([played], [slate]).iloc[0]
+        counted = snapshot_features([played], [slate], [scheduled]).iloc[0]
+        other_score = snapshot_features(
+            [played], [slate], [replace(scheduled, home_score=140, away_score=80)]
+        ).iloc[0]
+        same_day = snapshot_features([played], [slate], [_game(3, "BOS", "LAL")]).iloc[0]
+
+        self.assertEqual(without["away_back_to_back"], 0)
+        self.assertEqual(without["away_games_prior_7d"], 1)
+        self.assertEqual(counted["away_back_to_back"], 1)
+        self.assertEqual(counted["away_games_prior_7d"], 2)
+        self.assertEqual(counted["home_back_to_back"], 0)
+        self.assertEqual(counted["home_elo_minus_away_elo"], without["home_elo_minus_away_elo"])
+        self.assertEqual(counted["away_win_rate"], other_score["away_win_rate"])
+        self.assertEqual(counted["home_elo_minus_away_elo"], other_score["home_elo_minus_away_elo"])
+        self.assertEqual(same_day["away_back_to_back"], 0)
+
+    def test_postponed_game_is_left_off_the_schedule(self) -> None:
+        from nba_moneyline.slate import scheduled_games_on
+
+        def event(event_id: str, status: str, home: str, away: str) -> dict[str, object]:
+            return {
+                "id": event_id,
+                "season": {"type": 2, "year": 2027},
+                "competitions": [
+                    {
+                        "neutralSite": False,
+                        "status": {"type": {"name": status, "shortDetail": ""}},
+                        "competitors": [
+                            {"homeAway": "home", "team": {"abbreviation": home, "displayName": home}, "score": ""},
+                            {"homeAway": "away", "team": {"abbreviation": away, "displayName": away}, "score": ""},
+                        ],
+                    }
+                ],
+            }
+
+        found = scheduled_games_on(
+            {
+                "events": [
+                    event("1", "STATUS_SCHEDULED", "UTAH", "DAL"),
+                    event("2", "STATUS_POSTPONED", "NY", "IND"),
+                ]
+            },
+            date(2026, 11, 23),
+        )
+        self.assertEqual([game.home_team for game in found], ["UTAH"])
+
     def test_snapshot_ignores_the_slate_score(self) -> None:
         history = [_game(0, "BOS", "NYK", 110, 100)]
         home_win = snapshot_features(history, [_game(1, "BOS", "NYK", 140, 80)])
