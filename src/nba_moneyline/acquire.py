@@ -71,6 +71,15 @@ def _fetch(url: str) -> str:
     raise RuntimeError(f"failed to fetch {url}") from last_error
 
 
+def refresh_scoreboard(game_date: date) -> None:
+    """Replace one day's cached scoreboard with the current ESPN page."""
+
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    body = _fetch(scoreboard_url(game_date))
+    json.loads(body)
+    cache_path(game_date).write_text(body, encoding="utf-8")
+
+
 def ensure_scoreboards(
     end: date,
     start: date = FIRST_DATE,

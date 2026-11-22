@@ -8,9 +8,10 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from nba_moneyline.acquire import cache_path, ensure_scoreboards, games_from_scoreboard, read_games
+from nba_moneyline.acquire import cache_path, ensure_scoreboards, games_from_scoreboard, read_games, refresh_scoreboard
 from nba_moneyline.closing_odds import cached_summary_line, line_from_quote
 from nba_moneyline.constants import FEATURE_COLUMNS, TEAMS
+from nba_moneyline.opening_odds import OPENING_ODDS_CSV
 from nba_moneyline.features import snapshot_features
 from nba_moneyline.schema import Game
 from nba_moneyline.train import MODEL_PATH, load_model_bundle
@@ -33,6 +34,8 @@ class SlateGame:
     away_score: int | None
     home_odds: float | None
     away_odds: float | None
+    home_open: float | None
+    away_open: float | None
     provider: str
     spread: str
 
@@ -86,6 +89,8 @@ def games_on_scoreboard(payload: dict, slate_date: date) -> list[SlateGame]:
                 away_score=away_score,
                 home_odds=_optional_float(line.get("home_odds")),
                 away_odds=_optional_float(line.get("away_odds")),
+                home_open=_optional_float(line.get("home_open")),
+                away_open=_optional_float(line.get("away_open")),
                 provider=str(line.get("provider") or ""),
                 spread=str(line.get("spread") or ""),
             )
@@ -134,6 +139,25 @@ def completed_games_before(target: date, *, include_same_day_finals: bool = Fals
     return games
 
 
+def _fill_saved_opens(games: list[SlateGame]) -> None:
+    """Use the Action Network open when the scoreboard quote has no opening price."""
+
+    missing = [game for game in games if game.home_open is None or game.away_open is None]
+    if not missing or not OPENING_ODDS_CSV.is_file():
+        return
+    saved = pd.read_csv(OPENING_ODDS_CSV, usecols=["game_id", "home_open", "away_open"])
+    by_id = saved.drop_duplicates("game_id", keep="last").set_index("game_id")
+    for game in missing:
+        key = f"espn_{game.event_id}"
+        if key not in by_id.index:
+            continue
+        row = by_id.loc[key]
+        if game.home_open is None:
+            game.home_open = _optional_float(row["home_open"])
+        if game.away_open is None:
+            game.away_open = _optional_float(row["away_open"])
+
+
 def _placeholder(game: SlateGame) -> Game:
     return Game(
         game_id=f"espn_{game.event_id}",
@@ -151,6 +175,8 @@ def score_slate(target: date, *, today: date | None = None) -> pd.DataFrame:
 
     current = today or date.today()
     ensure_scoreboards(max(target, current))
+    if target >= current:
+        refresh_scoreboard(target)
     path = cache_path(target)
     if not path.exists():
         return pd.DataFrame()
@@ -168,15 +194,23 @@ def score_slate(target: date, *, today: date | None = None) -> pd.DataFrame:
 
     if target >= current:
         for game in selected:
-            if game.home_odds is not None and game.away_odds is not None:
+            needs_price = game.home_odds is None or game.away_odds is None
+            needs_open = game.home_open is None or game.away_open is None
+            if not needs_price and not needs_open:
                 continue
             line = cached_summary_line(game.event_id)
             if line is None:
                 continue
-            game.home_odds = _optional_float(line.get("home_odds"))
-            game.away_odds = _optional_float(line.get("away_odds"))
-            game.provider = str(line.get("provider") or game.provider)
-            game.spread = str(line.get("spread") or game.spread)
+            if needs_price:
+                game.home_odds = _optional_float(line.get("home_odds"))
+                game.away_odds = _optional_float(line.get("away_odds"))
+                game.provider = str(line.get("provider") or game.provider)
+                game.spread = str(line.get("spread") or game.spread)
+            if game.home_open is None:
+                game.home_open = _optional_float(line.get("home_open"))
+            if game.away_open is None:
+                game.away_open = _optional_float(line.get("away_open"))
+    _fill_saved_opens(selected)
 
     features = snapshot_features(history, [_placeholder(game) for game in selected])
     if features.empty:
@@ -203,6 +237,8 @@ def score_slate(target: date, *, today: date | None = None) -> pd.DataFrame:
                 "status_detail": game.status_detail,
                 "home_odds": game.home_odds,
                 "away_odds": game.away_odds,
+                "home_open": game.home_open,
+                "away_open": game.away_open,
                 "provider": game.provider,
                 "spread": game.spread,
                 "live_home_score": game.home_score,

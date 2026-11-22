@@ -101,18 +101,23 @@ def line_from_quote(quote: dict) -> dict[str, object] | None:
     return {
         "home_odds": home_odds,
         "away_odds": away_odds,
+        "home_open": _recorded_price(moneyline.get("home"), "open"),
+        "away_open": _recorded_price(moneyline.get("away"), "open"),
         "provider": provider,
         "spread": str(quote.get("details") or ""),
     }
 
 
-def cached_summary_line(event_id: str) -> dict[str, object] | None:
+def cached_summary_line(event_id: str, *, refresh: bool = False) -> dict[str, object] | None:
     path = cache_path(event_id)
-    if not path.exists():
+    if refresh or not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_fetch(summary_url(event_id)), encoding="utf-8")
     payload = json.loads(path.read_text(encoding="utf-8"))
-    return closing_line_from_summary(payload)
+    line = closing_line_from_summary(payload)
+    if line is None and not refresh:
+        return cached_summary_line(event_id, refresh=True)
+    return line
 
 
 def _recorded_price(side: dict | None, kind: str) -> float | None:

@@ -70,7 +70,24 @@ class MarketTests(unittest.TestCase):
         )
         self.assertEqual(line["home_odds"], -130)
         self.assertEqual(line["away_odds"], 110)
+        self.assertIsNone(line["home_open"])
+        self.assertIsNone(line["away_open"])
         self.assertEqual(line["spread"], "GS -1.5")
+
+    def test_scoreboard_quote_keeps_the_opening_price(self) -> None:
+        line = line_from_quote(
+            {
+                "provider": {"name": "Draft Kings"},
+                "moneyline": {
+                    "home": {"close": {"odds": "-148"}, "open": {"odds": "-130"}},
+                    "away": {"close": {"odds": "+124"}, "open": {"odds": "+110"}},
+                },
+            }
+        )
+        self.assertEqual(line["home_odds"], -148)
+        self.assertEqual(line["away_odds"], 124)
+        self.assertEqual(line["home_open"], -130)
+        self.assertEqual(line["away_open"], 110)
 
     def test_even_money_and_profit(self) -> None:
         self.assertEqual(parse_american_odds("EVEN"), 100)

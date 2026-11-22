@@ -168,6 +168,7 @@ def render_side(
     market_prob: object,
     edge: object,
     odds: object,
+    open_odds: object,
     show_market: bool,
 ) -> None:
     st.subheader(team)
@@ -182,6 +183,8 @@ def render_side(
         st.metric("DraftKings fair probability", percent(market_prob))
         if pd.notna(market_prob):
             st.progress(min(1.0, max(0.0, float(market_prob))), text=f"Moneyline {moneyline(odds)}")
+    if pd.notna(open_odds):
+        st.caption(f"Open {moneyline(open_odds)}")
 
 
 def render_daily_slate(
@@ -303,6 +306,7 @@ def render_daily_slate(
                     market_prob=game.get("p_away_mkt"),
                     edge=game.get("edge_away"),
                     odds=game.get("away_odds"),
+                    open_odds=game.get("away_open"),
                     show_market=not is_past,
                 )
             with home_col:
@@ -312,6 +316,7 @@ def render_daily_slate(
                     market_prob=game.get("p_home_mkt"),
                     edge=game.get("edge_home"),
                     odds=game.get("home_odds"),
+                    open_odds=game.get("home_open"),
                     show_market=not is_past,
                 )
 
@@ -492,8 +497,9 @@ with st.sidebar:
     if target_date == today:
         st.button("View tomorrow", width="stretch", on_click=choose_tomorrow)
     st.caption(
-        "Past dates show model probabilities only. Today and later dates use the current "
-        "DraftKings moneyline. Margin is model probability minus the vig-free price."
+        "Past dates show the model and the opening line when one was saved. "
+        "Today and later dates use the current DraftKings moneyline, with the opening price under it. "
+        "Margin is model probability minus the vig-free price."
     )
 
 slate_tab, profit_tab = st.tabs(["Daily slate", "Results"])
