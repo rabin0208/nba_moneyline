@@ -77,6 +77,8 @@ def _game(
 class FeatureTests(unittest.TestCase):
     def test_column_contract(self) -> None:
         self.assertEqual(len(FEATURE_COLUMNS), 29)
+        self.assertNotIn("home_fresh_absence", FEATURE_COLUMNS)
+        self.assertNotIn("away_fresh_absence", FEATURE_COLUMNS)
         self.assertIn("prev_offensive_rating_diff", FEATURE_COLUMNS)
         self.assertIn("prev_defensive_rating_diff", FEATURE_COLUMNS)
         self.assertIn("season_offensive_rating_diff", FEATURE_COLUMNS)

@@ -111,3 +111,4 @@ The previous game can fall in the prior season. There is no season reset.
 - A raw last-10 offensive or defensive rating. The last-10 ratings are the opponent-adjusted versions.
 - Points per game, field-goal percentage, three-point percentage, turnovers per game, and rebounds per game. The possession-adjusted rates replace them.
 - Shot-quality share. Offensive and defensive rating cover that comparison.
+- An equal-weighted starting five, a raw count of players listed Out, and the minutes of a regular who is newly missing. Long absences are already in the team ratings. The fresh-absence columns made the probabilities sharper and the high-edge closing bets worse, so they were removed.
