@@ -88,7 +88,7 @@ defensive rating = 100 × points allowed / opponent possessions
 
 `home_elo_minus_away_elo`.
 
-One difference. Ratings are rebuilt from games inside the same three-season window, and every team starts at 1500 for that replay. Scale 400. K is 20. The update uses the win and the loss only: no home-court bump, no margin of victory, and no smaller step for overtime. Ratings for a date are read before that date's games are applied.
+One difference. Ratings are rebuilt from games inside the same three-season window, and every team starts at 1500 for that replay. Scale 400. K is 20. There is no home-court bump and no smaller step for overtime. The step is multiplied by `(margin + 3) ^ 0.8 / (7.5 + 0.006 × winner Elo minus loser Elo)`, so a blowout moves the rating more than a one-point win, and a favorite's blowout moves it less than an underdog's. Ratings for a date are read before that date's games are applied.
 
 ### Fatigue
 

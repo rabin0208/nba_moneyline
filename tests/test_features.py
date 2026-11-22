@@ -75,6 +75,7 @@ def _game(
 class FeatureTests(unittest.TestCase):
     def test_column_contract(self) -> None:
         self.assertEqual(len(FEATURE_COLUMNS), 29)
+        self.assertNotIn("home_days_rest", FEATURE_COLUMNS)
         self.assertNotIn("home_prior_games", FEATURE_COLUMNS)
         self.assertNotIn("away_prior_games", FEATURE_COLUMNS)
         self.assertNotIn("home_recent_result_residual", FEATURE_COLUMNS)
@@ -98,7 +99,6 @@ class FeatureTests(unittest.TestCase):
         self.assertNotIn("home_turnovers_per_game", FEATURE_COLUMNS)
         self.assertNotIn("home_rebounds_per_game", FEATURE_COLUMNS)
         self.assertNotIn("home_shot_quality_share", FEATURE_COLUMNS)
-        self.assertNotIn("home_days_rest", FEATURE_COLUMNS)
         self.assertIn("home_recent_offensive_rating", FEATURE_COLUMNS)
         self.assertIn("away_recent_offensive_rating", FEATURE_COLUMNS)
         self.assertIn("home_recent_defensive_rating", FEATURE_COLUMNS)
@@ -114,12 +114,15 @@ class FeatureTests(unittest.TestCase):
         self.assertNotIn("home_recent_extra_time_rate", FEATURE_COLUMNS)
         self.assertNotIn("home_recent_extra_time_wins", FEATURE_COLUMNS)
 
-    def test_elo_update_has_no_home_or_margin_term(self) -> None:
-        home, away = updated_ratings(1500, 1500, True)
-        self.assertAlmostEqual(home, 1510)
-        self.assertAlmostEqual(away, 1490)
-        blowout_home, _blowout_away = updated_ratings(1500, 1500, True)
-        self.assertAlmostEqual(home, blowout_home)
+    def test_elo_update_has_no_home_court_and_grows_with_margin(self) -> None:
+        home, away = updated_ratings(1500, 1500, True, 101, 100)
+        self.assertAlmostEqual(home, 1504.0419108440278)
+        self.assertAlmostEqual(away, 1495.9580891559722)
+        blowout_home, _blowout_away = updated_ratings(1500, 1500, True, 130, 100)
+        self.assertGreater(blowout_home, home)
+        home_after_loss, away_after_win = updated_ratings(1500, 1500, False, 100, 101)
+        self.assertAlmostEqual(away_after_win, home)
+        self.assertAlmostEqual(home_after_loss, away)
 
     def test_same_day_results_are_invisible(self) -> None:
         first = _game(0, "BOS", "NYK", 120, 100)

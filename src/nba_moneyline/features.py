@@ -42,11 +42,27 @@ def expected_score(rating: float, opponent_rating: float) -> float:
     return 1.0 / (1.0 + 10.0 ** ((opponent_rating - rating) / ELO_SCALE))
 
 
-def updated_ratings(home_rating: float, away_rating: float, home_won: bool) -> tuple[float, float]:
+def margin_multiplier(home_rating: float, away_rating: float, home_points: int, away_points: int) -> float:
+    """A blowout moves Elo more than a one-point win. A favorite's blowout moves it less."""
+
+    margin = abs(home_points - away_points)
+    winner_rating = home_rating if home_points > away_points else away_rating
+    loser_rating = away_rating if home_points > away_points else home_rating
+    return (margin + 3) ** 0.8 / (7.5 + 0.006 * (winner_rating - loser_rating))
+
+
+def updated_ratings(
+    home_rating: float,
+    away_rating: float,
+    home_won: bool,
+    home_points: int,
+    away_points: int,
+) -> tuple[float, float]:
     home_expected = expected_score(home_rating, away_rating)
     home_score = 1.0 if home_won else 0.0
-    new_home = home_rating + ELO_K * (home_score - home_expected)
-    new_away = away_rating + ELO_K * ((1.0 - home_score) - (1.0 - home_expected))
+    step = ELO_K * margin_multiplier(home_rating, away_rating, home_points, away_points)
+    new_home = home_rating + step * (home_score - home_expected)
+    new_away = away_rating + step * ((1.0 - home_score) - (1.0 - home_expected))
     return new_home, new_away
 
 
@@ -128,6 +144,8 @@ class EloEvent:
     home_team: str
     away_team: str
     home_won: bool
+    home_points: int
+    away_points: int
 
 
 @dataclass
@@ -378,6 +396,8 @@ def ratings_from_events(events: list[EloEvent], season_start: int) -> dict[str, 
             ratings[event.home_team],
             ratings[event.away_team],
             event.home_won,
+            event.home_points,
+            event.away_points,
         )
         ratings[event.home_team] = new_home
         ratings[event.away_team] = new_away
@@ -620,6 +640,8 @@ def _walk(games: list[Game]) -> tuple[list[dict[str, object]], dict[str, TeamSta
                     home_team=game.home_team,
                     away_team=game.away_team,
                     home_won=bool(game.home_win),
+                    home_points=game.home_score,
+                    away_points=game.away_score,
                 )
             )
         index = end
