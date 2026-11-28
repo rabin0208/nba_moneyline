@@ -29,18 +29,29 @@ SKIPPED_CSV = PROJECT_ROOT / "data" / "skipped_games.csv"
 FIRST_DATE = date(2015, 10, 1)
 LAST_DATE = date(2026, 6, 30)
 REQUEST_PAUSE_SECONDS = 0.05
-USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-)
+# site.api.espn.com answers 403 from datacenter IPs (Streamlit Cloud). site.web.api
+# serves the same routes. A copied browser User-Agent is also refused, so requests
+# identify themselves with the client default.
+ESPN_WEB_HOST = "https://site.web.api.espn.com"
+ESPN_SITE_HOST = "https://site.api.espn.com"
 TEAM_SET = set(TEAMS)
 
 
 def scoreboard_url(game_date: date) -> str:
     return (
-        "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+        f"{ESPN_WEB_HOST}/apis/site/v2/sports/basketball/nba/scoreboard"
         f"?dates={game_date:%Y%m%d}&limit=50"
     )
+
+
+def espn_fetch_urls(url: str) -> tuple[str, ...]:
+    """Try site.web.api first, then site.api, for the same path."""
+
+    if url.startswith(ESPN_WEB_HOST):
+        return (url, ESPN_SITE_HOST + url[len(ESPN_WEB_HOST):])
+    if url.startswith(ESPN_SITE_HOST):
+        return (ESPN_WEB_HOST + url[len(ESPN_SITE_HOST):], url)
+    return (url,)
 
 
 def cache_path(game_date: date) -> Path:
@@ -53,21 +64,24 @@ def iter_dates() -> list[date]:
 
 
 def _fetch(url: str) -> str:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     last_error: Exception | None = None
-    for attempt in range(6):
-        try:
-            with urllib.request.urlopen(request, timeout=45) as response:
-                return response.read().decode("utf-8")
-        except urllib.error.HTTPError as error:
-            last_error = error
-            if error.code not in {429, 503}:
-                raise
-            print(f"  {error.code} on {url}; waiting {30 * (attempt + 1)}s", flush=True)
-            time.sleep(30 * (attempt + 1))
-        except urllib.error.URLError as error:
-            last_error = error
-            time.sleep(5 * (attempt + 1))
+    for candidate in espn_fetch_urls(url):
+        request = urllib.request.Request(candidate, headers={"Accept": "application/json"})
+        for attempt in range(6):
+            try:
+                with urllib.request.urlopen(request, timeout=45) as response:
+                    return response.read().decode("utf-8")
+            except urllib.error.HTTPError as error:
+                last_error = error
+                if error.code == 403:
+                    break
+                if error.code not in {429, 503}:
+                    raise
+                print(f"  {error.code} on {candidate}; waiting {30 * (attempt + 1)}s", flush=True)
+                time.sleep(30 * (attempt + 1))
+            except urllib.error.URLError as error:
+                last_error = error
+                time.sleep(5 * (attempt + 1))
     raise RuntimeError(f"failed to fetch {url}") from last_error
 
 

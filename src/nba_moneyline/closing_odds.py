@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from nba_moneyline.acquire import ESPN_WEB_HOST, espn_fetch_urls
 from nba_moneyline.market import is_valid_american_odds, parse_american_odds
 from nba_moneyline.train import FEATURES_CSV
 
@@ -20,14 +21,10 @@ CORE_ODDS_DIR = PROJECT_ROOT / "data" / "raw" / "espn_core_odds"
 CLOSING_ODDS_CSV = PROJECT_ROOT / "data" / "closing_odds.csv"
 HISTORICAL_SEASON_STARTS = tuple(range(2017, 2025))
 PAUSE_SECONDS = 0.05
-USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-)
 
 
 def summary_url(event_id: str) -> str:
-    return f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event={event_id}"
+    return f"{ESPN_WEB_HOST}/apis/site/v2/sports/basketball/nba/summary?event={event_id}"
 
 
 def cache_path(event_id: str) -> Path:
@@ -48,20 +45,23 @@ def ensure_summary(event_id: str) -> Path:
 
 
 def _fetch(url: str) -> str:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     last_error: Exception | None = None
-    for attempt in range(5):
-        try:
-            with urllib.request.urlopen(request, timeout=45) as response:
-                return response.read().decode("utf-8")
-        except urllib.error.HTTPError as error:
-            last_error = error
-            if error.code not in {429, 503}:
-                raise
-            time.sleep(20 * (attempt + 1))
-        except urllib.error.URLError as error:
-            last_error = error
-            time.sleep(5 * (attempt + 1))
+    for candidate in espn_fetch_urls(url):
+        request = urllib.request.Request(candidate, headers={"Accept": "application/json"})
+        for attempt in range(5):
+            try:
+                with urllib.request.urlopen(request, timeout=45) as response:
+                    return response.read().decode("utf-8")
+            except urllib.error.HTTPError as error:
+                last_error = error
+                if error.code == 403:
+                    break
+                if error.code not in {429, 503}:
+                    raise
+                time.sleep(20 * (attempt + 1))
+            except urllib.error.URLError as error:
+                last_error = error
+                time.sleep(5 * (attempt + 1))
     raise RuntimeError(f"failed to fetch {url}") from last_error
 
 
